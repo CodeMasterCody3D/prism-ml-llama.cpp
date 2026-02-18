@@ -1,4 +1,4 @@
-#if defined(DATA_A_TQ2_0)
+#if defined(DATA_A_TQ2_0) || defined(DATA_A_TQ1_0)
 #include "tq_utils.comp"
 #endif
 
@@ -178,6 +178,22 @@ void load_a_to_shmem(const uint pos_a, const uint row, const uint col, const uin
 
             const FLOAT_TYPE v0 = FLOAT_TYPE(tq2_dequantize(ib, e0)) * d;
             const FLOAT_TYPE v1 = FLOAT_TYPE(tq2_dequantize(ib, e1)) * d;
+
+            buf_a[buf_idx] = FLOAT_TYPEV2(v0, v1);
+#elif defined(DATA_A_TQ1_0)
+            const uint idx = pos_a + col * p.stride_a / LOAD_VEC_A + row;
+            const uint buf_idx = col * SHMEM_STRIDE + row * LOAD_VEC_A / 2;
+
+            const uint ib = idx / 128;
+            const uint iqs = idx % 128;
+
+            const FLOAT_TYPE d = FLOAT_TYPE(data_a[ib].d);
+
+            const uint e0 = 2 * iqs;
+            const uint e1 = e0 + 1;
+
+            const FLOAT_TYPE v0 = FLOAT_TYPE(tq1_dequantize(ib, e0)) * d;
+            const FLOAT_TYPE v1 = FLOAT_TYPE(tq1_dequantize(ib, e1)) * d;
 
             buf_a[buf_idx] = FLOAT_TYPEV2(v0, v1);
 #elif defined(DATA_A_Q2_K)
