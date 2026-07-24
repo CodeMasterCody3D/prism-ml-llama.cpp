@@ -215,6 +215,9 @@ llama_build_and_test(
 )
 llama_build_and_test(test-regex-partial.cpp)
 llama_build_and_test(test-vulkan-q2_0-shader-sim.cpp)
+llama_build_and_test(test-vulkan-tq-regressions.cpp)
+target_compile_definitions(test-vulkan-tq-regressions PRIVATE GGML_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
+llama_build_and_test(test-vulkan-tq-standalone-dequant.cpp)
 
 if (NOT ${CMAKE_SYSTEM_PROCESSOR} MATCHES "s390x")
     set(MODEL_NAME "tinyllamas/stories15M-q4_0.gguf")

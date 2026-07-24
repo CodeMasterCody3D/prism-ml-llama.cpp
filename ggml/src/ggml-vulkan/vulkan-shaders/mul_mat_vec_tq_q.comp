@@ -29,7 +29,7 @@ void compute_outputs(const uint32_t first_row, const uint32_t num_rows) {
     for (uint jcol = 0; jcol < NUM_COLS; jcol++) {
         const uint b_base = (jcol * p.batch_stride_b);
         for (uint n = 0; n < num_rows; ++n) {
-            const uint ib0 = a_offset / QUANT_K + (first_row + n) * num_blocks_per_row;
+            const uint ib0 = a_offset + (first_row + n) * num_blocks_per_row;
             FLOAT_TYPE acc = 0.0f;
             for (uint i = tid/8; i < num_blocks_per_row; i+=gl_WorkGroupSize.x/8) {
                 const float d = float(data_a[ib0 + i].d);
@@ -43,8 +43,8 @@ void compute_outputs(const uint32_t first_row, const uint32_t num_rows) {
                         const uint b0_idx = i * QUANT_K + j * 4 + l * 32;
                         const uint b1_idx = i * QUANT_K + j * 4 + (l+1) * 32;
 
-                        const uint b0_block_idx = b_offset + (b_base + b0_idx) / QUANT_K_Q8_1;
-                        const uint b1_block_idx = b_offset + (b_base + b1_idx) / QUANT_K_Q8_1;
+                        const uint b0_block_idx = (b_offset + b_base + b0_idx) / QUANT_K_Q8_1;
+                        const uint b1_block_idx = (b_offset + b_base + b1_idx) / QUANT_K_Q8_1;
                         const uint b0_block_idx_outer = b0_block_idx / 4;
                         const uint b1_block_idx_outer = b1_block_idx / 4;
                         const uint b0_block_idx_inner = b0_block_idx % 4;
@@ -64,7 +64,7 @@ void compute_outputs(const uint32_t first_row, const uint32_t num_rows) {
                     }
                 }
             }
-            temp[jcol][n] = acc; 
+            temp[jcol][n] = acc;
         }
     }
 

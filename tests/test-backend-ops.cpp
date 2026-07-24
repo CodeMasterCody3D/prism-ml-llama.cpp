@@ -1138,6 +1138,10 @@ struct test_case {
 
     virtual ggml_tensor * build_graph(ggml_context * ctx) = 0;
 
+    virtual bool compare_raw_output() {
+        return false;
+    }
+
     virtual double max_nmse_err() {
         return 1e-7;
     }
@@ -1414,6 +1418,24 @@ struct test_case {
                     ud->ok = false;
                     return true;
                 }
+            }
+
+            if (t1->op != GGML_OP_NONE && ud->tc->compare_raw_output()) {
+                const size_t nbytes = ggml_nbytes(t1);
+                std::vector<uint8_t> t1_data(nbytes);
+                std::vector<uint8_t> t2_data(nbytes);
+                ggml_backend_tensor_get(t1, t1_data.data(), 0, nbytes);
+                ggml_backend_tensor_get(t2, t2_data.data(), 0, nbytes);
+                if (memcmp(t1_data.data(), t2_data.data(), nbytes) != 0) {
+                    size_t first = 0;
+                    while (first < nbytes && t1_data[first] == t2_data[first]) {
+                        ++first;
+                    }
+                    printf("[%s] raw byte mismatch at %zu (%s=0x%02x %s=0x%02x) ",
+                           ggml_op_desc(t1), first, bn1, t1_data[first], bn2, t2_data[first]);
+                    ud->ok = false;
+                }
+                return true;
             }
 
             std::vector<float> f1 = tensor_to_float(t1);
@@ -2984,6 +3006,83 @@ struct test_cpy : public test_case {
         for (ggml_tensor * t = ggml_get_first_tensor(ctx); t != NULL; t = ggml_get_next_tensor(ctx, t)) {
             // test extended range of values to check if casting between f32 and i32 is consistent
             init_tensor_uniform(t, -150.f, 150.f);
+        }
+    }
+};
+
+struct test_cpy_tq_ties : public test_cpy {
+    explicit test_cpy_tq_ties(ggml_type type_dst)
+        : test_cpy(GGML_TYPE_F32, type_dst, {2048, 1, 1, 1}) {}
+
+    bool compare_raw_output() override {
+        return true;
+    }
+
+    void initialize_tensors(ggml_context * ctx) override {
+        for (ggml_tensor * t = ggml_get_first_tensor(ctx); t != NULL; t = ggml_get_next_tensor(ctx, t)) {
+            if (t->type != GGML_TYPE_F32 || strcmp(t->name, "src") != 0) {
+                continue;
+            }
+
+            std::vector<float> data(ggml_nelements(t), 0.0f);
+            constexpr size_t block_size = 256;
+            constexpr size_t nblocks = 8;
+
+            if (type_dst == GGML_TYPE_TQ1_0) {
+                // Eight blocks x 32 low bytes cover all 243 valid five-trit combinations.
+                for (size_t b = 0; b < nblocks; ++b) {
+                    const size_t base = b * block_size;
+                    for (size_t m = 0; m < 32; ++m) {
+                        const unsigned code = static_cast<unsigned>((b * 32 + m) % 243);
+                        unsigned divisor = 81;
+                        for (size_t n = 0; n < 5; ++n) {
+                            const unsigned digit = (code / divisor) % 3;
+                            data[base + m + n * 32] = static_cast<float>(static_cast<int>(digit) - 1);
+                            divisor /= 3;
+                        }
+                    }
+                    for (size_t m = 0; m < 16; ++m) {
+                        const unsigned code = static_cast<unsigned>((b * 16 + m) % 243);
+                        unsigned divisor = 81;
+                        for (size_t n = 0; n < 5; ++n) {
+                            const unsigned digit = (code / divisor) % 3;
+                            data[base + 160 + m + n * 16] = static_cast<float>(static_cast<int>(digit) - 1);
+                            divisor /= 3;
+                        }
+                    }
+                    for (size_t m = 0; m < 4; ++m) {
+                        const unsigned code = static_cast<unsigned>((b * 4 + m) % 81);
+                        unsigned divisor = 27;
+                        for (size_t n = 0; n < 4; ++n) {
+                            const unsigned digit = (code / divisor) % 3;
+                            data[base + 240 + m + n * 4] = static_cast<float>(static_cast<int>(digit) - 1);
+                            divisor /= 3;
+                        }
+                    }
+                }
+                // Explicit CPU lroundf half-away cases in a region separate from exhaustive low bytes.
+                data[7 * block_size + 160] = 0.5f;
+                data[7 * block_size + 161] = -0.5f;
+            } else {
+                // Two groups x 32 bytes per block; two blocks already cover all 81 valid four-trit lanes.
+                for (size_t b = 0; b < nblocks; ++b) {
+                    const size_t base = b * block_size;
+                    for (size_t byte = 0; byte < 64; ++byte) {
+                        unsigned code = static_cast<unsigned>((b * 64 + byte) % 81);
+                        const size_t group = byte / 32;
+                        const size_t m = byte % 32;
+                        for (size_t n = 0; n < 4; ++n) {
+                            const unsigned digit = code % 3;
+                            code /= 3;
+                            data[base + group * 128 + m + n * 32] = static_cast<float>(static_cast<int>(digit) - 1);
+                        }
+                    }
+                }
+                data[7 * block_size] = 0.5f;
+                data[7 * block_size + 1] = -0.5f;
+            }
+
+            ggml_backend_tensor_set(t, data.data(), 0, data.size() * sizeof(float));
         }
     }
 };
@@ -8566,6 +8665,17 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
                 }
             }
         }
+    }
+
+    for (ggml_type type_a : {GGML_TYPE_TQ1_0, GGML_TYPE_TQ2_0}) {
+        test_cases.emplace_back(new test_cpy_tq_ties(type_a));
+        test_cases.emplace_back(new test_set_rows(type_a, GGML_TYPE_I32, {256, 5, 1, 3}, {1, 1}, 1, false));
+        test_cases.emplace_back(new test_mul_mat(type_a, GGML_TYPE_F32, 512, 1, 4096, {1, 1}, {1, 1}));
+        test_cases.emplace_back(new test_mul_mat(type_a, GGML_TYPE_F32, 512, 32, 256, {1, 1}, {1, 1}));
+        test_cases.emplace_back(new test_mul_mat(type_a, GGML_TYPE_F32, 128, 1, 256, {2, 3}, {2, 1}));
+        test_cases.emplace_back(new test_mul_mat_id(type_a, GGML_TYPE_F32, 1, 1, false, 512, 32, 256));
+        test_cases.emplace_back(new test_mul_mat_id(type_a, GGML_TYPE_F16, 1, 1, false, 64, 1, 256));
+        test_cases.emplace_back(new test_mul_mat_id(type_a, GGML_TYPE_F32, 4, 2, false, 512, 32, 4096));
     }
 
     for (ggml_type type_a : other_types) {

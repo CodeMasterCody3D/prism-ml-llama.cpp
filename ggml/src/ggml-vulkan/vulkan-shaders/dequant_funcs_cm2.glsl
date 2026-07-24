@@ -1287,7 +1287,7 @@ float16_t dequantFuncTQ1_0(const in decodeBufTQ1_0 bl, const in uint blockCoords
         val = (((q * pow3[trit]) & 255) * 3) / 256;
     }
 
-    return d * float16_t(val - 1);
+    return d * float16_t(int(val) - 1);
 }
 #endif
 

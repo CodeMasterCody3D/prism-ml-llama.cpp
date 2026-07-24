@@ -234,6 +234,76 @@ void quantize(uint dst_idx, uint src_idx)
 }
 #endif
 
+#if defined(DATA_A_TQ2_0) || defined(DATA_A_TQ1_0)
+int tq_lround(float x)
+{
+    return x >= 0.0 ? int(floor(x + 0.5)) : int(ceil(x - 0.5));
+}
+#endif
+
+#if defined(DATA_A_TQ2_0)
+void quantize(uint dst_idx, uint src_idx)
+{
+    float amax = 0.0;
+    [[unroll]] for (int j = 0; j < QUANT_K_TQ2_0; ++j) {
+        amax = max(amax, abs(data_s[src_idx + j]));
+    }
+
+    const float id = amax > 0.0 ? 1.0 / amax : 0.0;
+    data_q[dst_idx].d = float16_t(amax);
+
+    [[unroll]] for (int group = 0; group < 2; ++group) {
+        [[unroll]] for (int m = 0; m < 32; ++m) {
+            uint q = 0;
+            [[unroll]] for (int n = 0; n < 4; ++n) {
+                const int xi = clamp(tq_lround(data_s[src_idx + group * 128 + m + n * 32] * id) + 1, 0, 2);
+                q |= uint(xi) << (2 * n);
+            }
+            data_q[dst_idx].qs[group * 32 + m] = uint8_t(q);
+        }
+    }
+}
+#endif
+
+#if defined(DATA_A_TQ1_0)
+uint tq1_encode5(uint src_idx, uint stride, float id)
+{
+    uint q = 0;
+    [[unroll]] for (uint n = 0; n < 5; ++n) {
+        const int xi = clamp(tq_lround(data_s[src_idx + n * stride] * id) + 1, 0, 2);
+        q = q * 3u + uint(xi);
+    }
+    return (q * 256u + 242u) / 243u;
+}
+
+void quantize(uint dst_idx, uint src_idx)
+{
+    float amax = 0.0;
+    [[unroll]] for (int j = 0; j < QUANT_K_TQ1_0; ++j) {
+        amax = max(amax, abs(data_s[src_idx + j]));
+    }
+
+    const float id = amax > 0.0 ? 1.0 / amax : 0.0;
+    data_q[dst_idx].d = float16_t(amax);
+
+    [[unroll]] for (uint m = 0; m < 32; ++m) {
+        data_q[dst_idx].qs[m] = uint8_t(tq1_encode5(src_idx + m, 32u, id));
+    }
+    [[unroll]] for (uint m = 0; m < 16; ++m) {
+        data_q[dst_idx].qs[32u + m] = uint8_t(tq1_encode5(src_idx + 160u + m, 16u, id));
+    }
+    [[unroll]] for (uint m = 0; m < 4; ++m) {
+        uint q = 0;
+        [[unroll]] for (uint n = 0; n < 4; ++n) {
+            const int xi = clamp(tq_lround(data_s[src_idx + 240u + m + n * 4u] * id) + 1, 0, 2);
+            q = q * 3u + uint(xi);
+        }
+        q *= 3u;
+        data_q[dst_idx].qh[m] = uint8_t((q * 256u + 242u) / 243u);
+    }
+}
+#endif
+
 #if defined(DATA_A_IQ4_NL)
 uint best_index(float x) {
     if (x <= kvalues_iq4nl[0]) return 0;
