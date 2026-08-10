@@ -184,17 +184,40 @@ typedef struct {
 } block_q1_0;
 static_assert(sizeof(block_q1_0) == sizeof(ggml_half) + QK1_0 / 8, "wrong q1_0 block size/padding");
 
-// Ternary group size. MUST change in lockstep with gguf-py/gguf/constants.py
-// (GGMLQuantizationType.Q1_0_g128 -> (QK1_0_g128, 1 + QK1_0_g128/4)) or Python
-// walks these files at the wrong stride and silently misdecodes every tensor.
+// Ternary {-1,0,+1} at 2 bits per weight, with a power-of-two scale (2^e) so
+// dequantization is a shift rather than a float multiply.
+//
+// Three group sizes are registered as three SEPARATE types rather than one
+// type behind a #define. That matters for two reasons:
+//   * the group size no longer requires a rebuild to change, and a file
+//     written at one group stays readable when you use another;
+//   * llama-quantize --tensor-type switches TYPES, so separate types are what
+//     let a single model mix them -- e.g. a g128 body with token_embd at g32,
+//     giving the most sensitive tensor finer scales for ~+0.05 bpw overall.
+//
+// Finer group = more scales = more bits:
+//   g32  -> 1 + 8  =  9 bytes / 32  = 2.25   bpw
+//   g64  -> 1 + 16 = 17 bytes / 64  = 2.125  bpw
+//   g128 -> 1 + 32 = 33 bytes / 128 = 2.0625 bpw
+//
+// Each entry MUST match gguf-py/gguf/constants.py, or Python walks the file at
+// the wrong stride and silently misdecodes every tensor.
 // Minimum is 32: vec_dot derives nsub = qk / QK8_0 (=32), so smaller makes it 0.
-// Set to 32 to match the group_size the QAT checkpoints were trained with.
-#define QK1_0_g128 32   // ternary 2-bit, group 32
-typedef struct {
-    int8_t  e;                  // power-of-two exponent: scale = 2^e (shift, not multiply)
-    uint8_t qs[QK1_0_g128 / 4]; // 2 bits per weight: ternary {-1,0,+1}
-} block_q1_0_g128;
-static_assert(sizeof(block_q1_0_g128) == sizeof(int8_t) + QK1_0_g128 / 4, "wrong q1_0_g128 block size/padding");
+#define QK1_0_g32   32
+#define QK1_0_g64   64
+#define QK1_0_g128 128
+
+#define GGML_Q1_0_GROUP_BLOCK(SUFFIX)                                          \
+    typedef struct {                                                           \
+        int8_t  e;                          /* scale = 2^e */                  \
+        uint8_t qs[QK1_0_##SUFFIX / 4];     /* 2 bits per weight */            \
+    } block_q1_0_##SUFFIX;                                                     \
+    static_assert(sizeof(block_q1_0_##SUFFIX) == sizeof(int8_t) + QK1_0_##SUFFIX / 4, \
+                  "wrong q1_0_" #SUFFIX " block size/padding");
+
+GGML_Q1_0_GROUP_BLOCK(g32)
+GGML_Q1_0_GROUP_BLOCK(g64)
+GGML_Q1_0_GROUP_BLOCK(g128)
 
 #define QK4_0 32
 typedef struct {

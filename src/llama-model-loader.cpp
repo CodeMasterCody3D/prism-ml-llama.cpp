@@ -38,6 +38,8 @@ static std::string llama_model_ftype_name(llama_ftype ftype) {
         case LLAMA_FTYPE_MOSTLY_BF16:     return "BF16";
         case LLAMA_FTYPE_MOSTLY_Q1_0:     return "Q1_0";
         case LLAMA_FTYPE_MOSTLY_Q1_0_g128: return "Q1_0_g128";
+        case LLAMA_FTYPE_MOSTLY_Q1_0_g32:  return "Q1_0_g32";
+        case LLAMA_FTYPE_MOSTLY_Q1_0_g64:  return "Q1_0_g64";
         case LLAMA_FTYPE_MOSTLY_Q4_0:     return "Q4_0";
         case LLAMA_FTYPE_MOSTLY_Q4_1:     return "Q4_1";
         case LLAMA_FTYPE_MOSTLY_Q5_0:     return "Q5_0";
@@ -761,6 +763,8 @@ llama_model_loader::llama_model_loader(
             case GGML_TYPE_NVFP4:   ftype = LLAMA_FTYPE_MOSTLY_NVFP4;   break;
             case GGML_TYPE_Q1_0:    ftype = LLAMA_FTYPE_MOSTLY_Q1_0;    break;
             case GGML_TYPE_Q1_0_g128: ftype = LLAMA_FTYPE_MOSTLY_Q1_0_g128; break;
+            case GGML_TYPE_Q1_0_g32:  ftype = LLAMA_FTYPE_MOSTLY_Q1_0_g32;  break;
+            case GGML_TYPE_Q1_0_g64:  ftype = LLAMA_FTYPE_MOSTLY_Q1_0_g64;  break;
             default:
                 {
                     LLAMA_LOG_WARN("%s: unknown type %s\n", __func__, ggml_type_name(type_max));

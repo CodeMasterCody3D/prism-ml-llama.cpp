@@ -430,7 +430,10 @@ extern "C" {
         GGML_TYPE_NVFP4   = 40, // NVFP4 (4 blocks, E4M3 scale)
         GGML_TYPE_Q1_0_g128 = 41,
         GGML_TYPE_Q1_0    = 42,
-        GGML_TYPE_COUNT   = 43,
+        // g128 keeps slot 41 so files written before the split stay readable.
+        GGML_TYPE_Q1_0_g32  = 43,
+        GGML_TYPE_Q1_0_g64  = 44,
+        GGML_TYPE_COUNT   = 45,
     };
 
     // precision
@@ -469,6 +472,8 @@ extern "C" {
         GGML_FTYPE_MOSTLY_NVFP4   = 26, // except 1d tensors
         GGML_FTYPE_MOSTLY_Q1_0_g128 = 27, // except 1d tensors
         GGML_FTYPE_MOSTLY_Q1_0    = 28, // except 1d tensors
+        GGML_FTYPE_MOSTLY_Q1_0_g32 = 29, // except 1d tensors
+        GGML_FTYPE_MOSTLY_Q1_0_g64 = 30, // except 1d tensors
     };
 
     // available tensor operations:

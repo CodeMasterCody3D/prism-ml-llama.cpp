@@ -804,6 +804,8 @@ ggml_type llama_ftype_get_default_type(llama_ftype ftype) {
         case LLAMA_FTYPE_MOSTLY_NVFP4:    return GGML_TYPE_NVFP4;
         case LLAMA_FTYPE_MOSTLY_Q1_0:     return GGML_TYPE_Q1_0;
         case LLAMA_FTYPE_MOSTLY_Q1_0_g128: return GGML_TYPE_Q1_0_g128;
+        case LLAMA_FTYPE_MOSTLY_Q1_0_g32:  return GGML_TYPE_Q1_0_g32;
+        case LLAMA_FTYPE_MOSTLY_Q1_0_g64:  return GGML_TYPE_Q1_0_g64;
 
         // K-quants
         case LLAMA_FTYPE_MOSTLY_Q2_K_S:

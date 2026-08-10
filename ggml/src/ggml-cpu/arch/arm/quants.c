@@ -203,6 +203,16 @@ void ggml_vec_dot_q1_0_q8_0(int n, float * GGML_RESTRICT s, size_t bs, const voi
     *s = sumf;
 }
 
+// No NEON path for this group size yet; the generic loop is correct.
+void ggml_vec_dot_q1_0_g32_q8_0(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
+    ggml_vec_dot_q1_0_g32_q8_0_generic(n, s, bs, vx, bx, vy, by, nrc);
+}
+
+// No NEON path for this group size yet; the generic loop is correct.
+void ggml_vec_dot_q1_0_g64_q8_0(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
+    ggml_vec_dot_q1_0_g64_q8_0_generic(n, s, bs, vx, bx, vy, by, nrc);
+}
+
 void ggml_vec_dot_q1_0_g128_q8_0(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
     const int qk = QK1_0_g128;  // 128
     const int nb = n / qk;

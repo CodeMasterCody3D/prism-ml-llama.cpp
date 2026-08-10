@@ -64,47 +64,54 @@ void quantize_row_q1_0_ref(const float * GGML_RESTRICT x, block_q1_0 * GGML_REST
     }
 }
 
-void quantize_row_q1_0_g128_ref(const float * GGML_RESTRICT x, block_q1_0_g128 * GGML_RESTRICT y, int64_t k) {
-    static const int qk = QK1_0_g128;
-
-    assert(k % qk == 0);
-
-    const int nb = k / qk;
-
-    for (int i = 0; i < nb; i++) {
-        float sum_abs = 0.0f;
-        for (int j = 0; j < qk; j++) {
-            sum_abs += fabsf(x[i*qk + j]);
-        }
-        const float d = sum_abs / qk;
-
-        // Round the scale to the nearest power of two so inference can apply
-        // it with a bit shift instead of a float multiply. Quantization runs
-        // offline, so using float here costs nothing at inference time.
-        int e = (d > 0.0f) ? (int)lrintf(log2f(d)) : -127;
-        if (e < -127) e = -127;
-        if (e >  127) e =  127;
-        y[i].e = (int8_t)e;
-        const float dq = ldexpf(1.0f, e);   // the scale actually stored
-
-        for (int j = 0; j < qk / 4; ++j) {
-            y[i].qs[j] = 0;
-        }
-
-        // BitNet b1.58 ternary: q = clamp(round(w/d), -1, 1) with d = mean|w|.
-        // Weights below d/2 collapse to the zero state -- the state a
-        // sign-only encoding lacks, and the reason this beats binary by
-        // ~1.3 dB. Stored offset by +1 so {-1,0,+1} maps to {0,1,2}.
-        const float id = dq > 0.0f ? 1.0f/dq : 0.0f;
-        for (int j = 0; j < qk; ++j) {
-            int q = (int)roundf(x[i*qk + j] * id);
-            if (q < -1) q = -1;
-            if (q >  1) q =  1;
-            const uint8_t code = (uint8_t)(q + 1);
-            y[i].qs[j / 4] |= (uint8_t)(code << (2 * (j % 4)));
-        }
-    }
+// Ternary quantize/dequantize for every registered group size. One macro so
+// the three types cannot drift apart -- the algorithm is identical and only
+// the block length differs.
+#define GGML_Q1_0_GROUP_QUANT(SUFFIX)                                                     \
+void quantize_row_q1_0_##SUFFIX##_ref(const float * GGML_RESTRICT x,                      \
+                                      block_q1_0_##SUFFIX * GGML_RESTRICT y, int64_t k) { \
+    const int qk = QK1_0_##SUFFIX;                                                        \
+    assert(k % qk == 0);                                                                  \
+    const int nb = k / qk;                                                                \
+                                                                                          \
+    for (int i = 0; i < nb; i++) {                                                        \
+        float sum_abs = 0.0f;                                                             \
+        for (int j = 0; j < qk; j++) {                                                    \
+            sum_abs += fabsf(x[i*qk + j]);                                                \
+        }                                                                                 \
+        const float d = sum_abs / qk;                                                     \
+                                                                                          \
+        /* Round the scale to the nearest power of two so inference applies it  */        \
+        /* with a bit shift instead of a float multiply. Quantization is        */        \
+        /* offline, so using float here costs nothing at inference time.        */        \
+        int e = (d > 0.0f) ? (int)lrintf(log2f(d)) : -127;                                \
+        if (e < -127) e = -127;                                                           \
+        if (e >  127) e =  127;                                                           \
+        y[i].e = (int8_t)e;                                                               \
+        const float dq = ldexpf(1.0f, e);                                                 \
+                                                                                          \
+        for (int j = 0; j < qk / 4; ++j) {                                                \
+            y[i].qs[j] = 0;                                                               \
+        }                                                                                 \
+                                                                                          \
+        /* BitNet b1.58 ternary: q = clamp(round(w/d), -1, 1) with d = mean|w|. */        \
+        /* Weights below d/2 collapse to the zero state -- the state a          */        \
+        /* sign-only encoding lacks, and the reason this beats binary by        */        \
+        /* ~1.3 dB. Stored offset by +1 so {-1,0,+1} maps to {0,1,2}.           */        \
+        const float id = dq > 0.0f ? 1.0f/dq : 0.0f;                                      \
+        for (int j = 0; j < qk; ++j) {                                                    \
+            int q = (int)roundf(x[i*qk + j] * id);                                        \
+            if (q < -1) q = -1;                                                           \
+            if (q >  1) q =  1;                                                           \
+            const uint8_t code = (uint8_t)(q + 1);                                        \
+            y[i].qs[j / 4] |= (uint8_t)(code << (2 * (j % 4)));                           \
+        }                                                                                 \
+    }                                                                                     \
 }
+
+GGML_Q1_0_GROUP_QUANT(g32)
+GGML_Q1_0_GROUP_QUANT(g64)
+GGML_Q1_0_GROUP_QUANT(g128)
 
 // reference implementation for deterministic creation of model files
 void quantize_row_q4_0_ref(const float * GGML_RESTRICT x, block_q4_0 * GGML_RESTRICT y, int64_t k) {
@@ -434,22 +441,25 @@ void dequantize_row_q1_0(const block_q1_0 * GGML_RESTRICT x, float * GGML_RESTRI
     }
 }
 
-void dequantize_row_q1_0_g128(const block_q1_0_g128 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
-    static const int qk = QK1_0_g128;
-
-    assert(k % qk == 0);
-
-    const int nb = k / qk;
-
-    for (int i = 0; i < nb; i++) {
-        const float d = ldexpf(1.0f, x[i].e);   // 2^e
-
-        for (int j = 0; j < qk; ++j) {
-            const uint8_t code = (x[i].qs[j / 4] >> (2 * (j % 4))) & 3;
-            y[i*qk + j] = ((int)code - 1) * d;   // {0,1,2} -> {-1,0,+1}
-        }
-    }
+#define GGML_Q1_0_GROUP_DEQUANT(SUFFIX)                                                   \
+void dequantize_row_q1_0_##SUFFIX(const block_q1_0_##SUFFIX * GGML_RESTRICT x,            \
+                                  float * GGML_RESTRICT y, int64_t k) {                   \
+    const int qk = QK1_0_##SUFFIX;                                                        \
+    assert(k % qk == 0);                                                                  \
+    const int nb = k / qk;                                                                \
+                                                                                          \
+    for (int i = 0; i < nb; i++) {                                                        \
+        const float d = ldexpf(1.0f, x[i].e);   /* 2^e */                                 \
+        for (int j = 0; j < qk; ++j) {                                                    \
+            const uint8_t code = (x[i].qs[j / 4] >> (2 * (j % 4))) & 3;                   \
+            y[i*qk + j] = ((int)code - 1) * d;  /* {0,1,2} -> {-1,0,+1} */                \
+        }                                                                                 \
+    }                                                                                     \
 }
+
+GGML_Q1_0_GROUP_DEQUANT(g32)
+GGML_Q1_0_GROUP_DEQUANT(g64)
+GGML_Q1_0_GROUP_DEQUANT(g128)
 
 void dequantize_row_q4_0(const block_q4_0 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
     static const int qk = QK4_0;
@@ -2105,20 +2115,24 @@ size_t quantize_q1_0(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst, 
     return nrow * row_size;
 }
 
-size_t quantize_q1_0_g128(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst, int64_t nrow, int64_t n_per_row, const float * quant_weights) {
-    if (!quant_weights) {
-        quantize_row_q1_0_g128_ref(src, dst, (int64_t)nrow*n_per_row);
-        return nrow * ggml_row_size(GGML_TYPE_Q1_0_g128, n_per_row);
-    }
-    size_t row_size = ggml_row_size(GGML_TYPE_Q1_0_g128, n_per_row);
-    char * qrow = (char *)dst;
-    for (int64_t row = 0; row < nrow; ++row) {
-        quantize_row_q1_0_g128_ref(src, (block_q1_0_g128*)qrow, n_per_row);
-        src += n_per_row;
-        qrow += row_size;
-    }
-    return nrow * row_size;
+#define GGML_Q1_0_GROUP_QUANTIZE(SUFFIX)                                                  \
+size_t quantize_q1_0_##SUFFIX(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst,  \
+                              int64_t nrow, int64_t n_per_row,                            \
+                              const float * quant_weights) {                              \
+    (void) quant_weights;   /* ternary scale is mean|w|; no imatrix weighting */          \
+    const size_t row_size = ggml_row_size(GGML_TYPE_Q1_0_##SUFFIX, n_per_row);            \
+    char * qrow = (char *)dst;                                                            \
+    for (int64_t row = 0; row < nrow; ++row) {                                            \
+        quantize_row_q1_0_##SUFFIX##_ref(src, (block_q1_0_##SUFFIX *)qrow, n_per_row);    \
+        src  += n_per_row;                                                                \
+        qrow += row_size;                                                                 \
+    }                                                                                     \
+    return nrow * row_size;                                                               \
 }
+
+GGML_Q1_0_GROUP_QUANTIZE(g32)
+GGML_Q1_0_GROUP_QUANTIZE(g64)
+GGML_Q1_0_GROUP_QUANTIZE(g128)
 
 
 size_t quantize_q4_0(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst, int64_t nrow, int64_t n_per_row, const float * quant_weights) {
@@ -5433,6 +5447,8 @@ bool ggml_validate_row_data(enum ggml_type type, const void * data, size_t nbyte
             {
                 VALIDATE_ROW_DATA_D_F16_IMPL(block_q1_0, data, nb);
             } break;
+        case GGML_TYPE_Q1_0_g32:
+        case GGML_TYPE_Q1_0_g64:
         case GGML_TYPE_Q1_0_g128:
             {
                 // scale is an int8 power-of-two exponent — cannot be NaN/Inf,

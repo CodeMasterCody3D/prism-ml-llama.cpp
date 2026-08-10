@@ -26,9 +26,15 @@ void quantize_row_q1_0(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, in
     quantize_row_q1_0_ref(x, y, k);
 }
 
-void quantize_row_q1_0_g128(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k) {
-    quantize_row_q1_0_g128_ref(x, y, k);
+#define GGML_Q1_0_GROUP_ROW(SUFFIX)                                                       \
+void quantize_row_q1_0_##SUFFIX(const float * GGML_RESTRICT x, void * GGML_RESTRICT y,    \
+                                int64_t k) {                                              \
+    quantize_row_q1_0_##SUFFIX##_ref(x, y, k);                                            \
 }
+
+GGML_Q1_0_GROUP_ROW(g32)
+GGML_Q1_0_GROUP_ROW(g64)
+GGML_Q1_0_GROUP_ROW(g128)
 
 void quantize_row_q4_0(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k) {
     quantize_row_q4_0_ref(x, y, k);
@@ -165,58 +171,57 @@ void ggml_vec_dot_q1_0_q8_0_generic(int n, float * GGML_RESTRICT s, size_t bs, c
     *s = sumf;
 }
 
-void ggml_vec_dot_q1_0_g128_q8_0_generic(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
-    const int qk = QK1_0_g128;
-    const int nb = n / qk;
-    
-    assert(n % qk == 0);
-    assert(nrc == 1);
-    UNUSED(nrc);
-    UNUSED(bx);
-    UNUSED(by);
-    UNUSED(bs);
-    
-    const block_q1_0_g128 * GGML_RESTRICT x = vx;
-    const block_q8_0 * GGML_RESTRICT y = vy;
-    
-    
-    float sumf = 0.0;
-    
-    // One Q1_0_g128 block spans (QK1_0_g128 / QK8_0) Q8_0 blocks. Derive that
-    // ratio instead of hardcoding 4, so the group size can be retuned by
-    // editing QK1_0_g128 alone — a hardcoded 4 would read past the y buffer.
-    const int nsub = qk / QK8_0;
-    for (int i = 0; i < nb; i++) {
-        // Weight scale is a power of two, so it is applied as a shift on the
-        // integer accumulator rather than a float multiply. The whole
-        // weight-side path below is integer: xi is {-1,0,+1}, so each step is
-        // literally add / skip / subtract against an int8 activation.
-        const int e0 = x[i].e;
-
-        float sumi = 0.0f;
-
-        for (int k = 0; k < nsub; k++) {
-            const float d1 = GGML_FP16_TO_FP32(y[i*nsub + k].d);
-
-            int sumi_block = 0;
-
-            for (int j = 0; j < QK8_0; j++) {
-                const int idx = k * QK8_0 + j;
-                // 2 bits per weight, stored offset by +1: {0,1,2} -> {-1,0,+1}
-                const int xi = (int)((x[i].qs[idx / 4] >> (2 * (idx % 4))) & 3) - 1;
-                sumi_block += xi * y[i*nsub + k].qs[j];
-            }
-
-            // Only the activation scale remains floating point. Making that a
-            // shift too requires a power-of-two-scaled activation type.
-            sumi += d1 * sumi_block;
-        }
-
-        sumf += ldexpf(sumi, e0);   // x * 2^e0 : exponent add, no multiply
-    }
-    
-    *s = sumf;
+// One ternary dot product per group size. nsub = qk / QK8_0 is derived, so a
+// g32 block spans 1 Q8_0 block, g64 spans 2, g128 spans 4 -- hardcoding it
+// would read past the activation buffer for every size but one.
+#define GGML_Q1_0_GROUP_VEC_DOT(SUFFIX)                                                   \
+void ggml_vec_dot_q1_0_##SUFFIX##_q8_0_generic(int n, float * GGML_RESTRICT s, size_t bs, \
+        const void * GGML_RESTRICT vx, size_t bx,                                         \
+        const void * GGML_RESTRICT vy, size_t by, int nrc) {                              \
+    const int qk = QK1_0_##SUFFIX;                                                        \
+    const int nb = n / qk;                                                                \
+                                                                                          \
+    assert(n % qk == 0);                                                                  \
+    assert(nrc == 1);                                                                     \
+    UNUSED(nrc); UNUSED(bx); UNUSED(by); UNUSED(bs);                                      \
+                                                                                          \
+    const block_q1_0_##SUFFIX * GGML_RESTRICT x = vx;                                     \
+    const block_q8_0 * GGML_RESTRICT y = vy;                                              \
+                                                                                          \
+    float sumf = 0.0;                                                                     \
+    const int nsub = qk / QK8_0;                                                          \
+                                                                                          \
+    for (int i = 0; i < nb; i++) {                                                        \
+        /* Weight scale is a power of two, applied as a shift on the integer   */         \
+        /* accumulator rather than a float multiply. The weight-side path is   */         \
+        /* fully integer: xi is {-1,0,+1}, so each step is add / skip / sub.   */         \
+        const int e0 = x[i].e;                                                            \
+        float sumi = 0.0f;                                                                \
+                                                                                          \
+        for (int k = 0; k < nsub; k++) {                                                  \
+            const float d1 = GGML_FP16_TO_FP32(y[i*nsub + k].d);                          \
+            int sumi_block = 0;                                                           \
+                                                                                          \
+            for (int j = 0; j < QK8_0; j++) {                                             \
+                const int idx = k * QK8_0 + j;                                            \
+                /* 2 bits per weight, offset by +1: {0,1,2} -> {-1,0,+1} */               \
+                const int xi = (int)((x[i].qs[idx / 4] >> (2 * (idx % 4))) & 3) - 1;      \
+                sumi_block += xi * y[i*nsub + k].qs[j];                                   \
+            }                                                                             \
+                                                                                          \
+            /* Only the activation scale is still floating point. */                      \
+            sumi += d1 * sumi_block;                                                      \
+        }                                                                                 \
+                                                                                          \
+        sumf += ldexpf(sumi, e0);   /* x * 2^e0 : exponent add, no multiply */            \
+    }                                                                                     \
+                                                                                          \
+    *s = sumf;                                                                            \
 }
+
+GGML_Q1_0_GROUP_VEC_DOT(g32)
+GGML_Q1_0_GROUP_VEC_DOT(g64)
+GGML_Q1_0_GROUP_VEC_DOT(g128)
 
 
 void ggml_vec_dot_q4_0_q8_0_generic(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
