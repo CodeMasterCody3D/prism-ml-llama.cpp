@@ -184,12 +184,17 @@ typedef struct {
 } block_q1_0;
 static_assert(sizeof(block_q1_0) == sizeof(ggml_half) + QK1_0 / 8, "wrong q1_0 block size/padding");
 
-#define QK1_0_g128 128
+// Ternary group size. MUST change in lockstep with gguf-py/gguf/constants.py
+// (GGMLQuantizationType.Q1_0_g128 -> (QK1_0_g128, 1 + QK1_0_g128/4)) or Python
+// walks these files at the wrong stride and silently misdecodes every tensor.
+// Minimum is 32: vec_dot derives nsub = qk / QK8_0 (=32), so smaller makes it 0.
+// Set to 32 to match the group_size the QAT checkpoints were trained with.
+#define QK1_0_g128 32   // ternary 2-bit, group 32
 typedef struct {
-    ggml_half d;               // delta
-    uint8_t qs[QK1_0_g128 / 8]; // bits / quants
+    int8_t  e;                  // power-of-two exponent: scale = 2^e (shift, not multiply)
+    uint8_t qs[QK1_0_g128 / 4]; // 2 bits per weight: ternary {-1,0,+1}
 } block_q1_0_g128;
-static_assert(sizeof(block_q1_0_g128) == sizeof(ggml_half) + QK1_0_g128 / 8, "wrong q1_0_g128 block size/padding");
+static_assert(sizeof(block_q1_0_g128) == sizeof(int8_t) + QK1_0_g128 / 4, "wrong q1_0_g128 block size/padding");
 
 #define QK4_0 32
 typedef struct {

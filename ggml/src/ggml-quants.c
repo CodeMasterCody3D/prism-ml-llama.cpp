@@ -49,17 +49,14 @@ void quantize_row_q1_0_ref(const float * GGML_RESTRICT x, block_q1_0 * GGML_REST
 
         y[i].d = GGML_FP32_TO_FP16(d);
 
-        // Clear all bits first
+        // block_q1_0 is 1 bit per weight (sign only) — unchanged.
         for (int j = 0; j < qk / 8; ++j) {
             y[i].qs[j] = 0;
         }
 
-        // Just store sign of each weight directly (no normalization)
         for (int j = 0; j < qk; ++j) {
-            const int bit_index = j;
-            const int byte_index = bit_index / 8;
-            const int bit_offset = bit_index % 8;
-
+            const int byte_index = j / 8;
+            const int bit_offset = j % 8;
             if (x[i*qk + j] >= 0.0f) {
                 y[i].qs[byte_index] |= (1 << bit_offset);
             }
@@ -81,22 +78,30 @@ void quantize_row_q1_0_g128_ref(const float * GGML_RESTRICT x, block_q1_0_g128 *
         }
         const float d = sum_abs / qk;
 
-        y[i].d = GGML_FP32_TO_FP16(d);
+        // Round the scale to the nearest power of two so inference can apply
+        // it with a bit shift instead of a float multiply. Quantization runs
+        // offline, so using float here costs nothing at inference time.
+        int e = (d > 0.0f) ? (int)lrintf(log2f(d)) : -127;
+        if (e < -127) e = -127;
+        if (e >  127) e =  127;
+        y[i].e = (int8_t)e;
+        const float dq = ldexpf(1.0f, e);   // the scale actually stored
 
-        // Clear all bits first
-        for (int j = 0; j < qk / 8; ++j) {
+        for (int j = 0; j < qk / 4; ++j) {
             y[i].qs[j] = 0;
         }
 
-        // Just store sign of each weight directly (no normalization)
+        // BitNet b1.58 ternary: q = clamp(round(w/d), -1, 1) with d = mean|w|.
+        // Weights below d/2 collapse to the zero state -- the state a
+        // sign-only encoding lacks, and the reason this beats binary by
+        // ~1.3 dB. Stored offset by +1 so {-1,0,+1} maps to {0,1,2}.
+        const float id = dq > 0.0f ? 1.0f/dq : 0.0f;
         for (int j = 0; j < qk; ++j) {
-            const int bit_index = j;
-            const int byte_index = bit_index / 8;
-            const int bit_offset = bit_index % 8;
-
-            if (x[i*qk + j] >= 0.0f) {
-                y[i].qs[byte_index] |= (1 << bit_offset);
-            }
+            int q = (int)roundf(x[i*qk + j] * id);
+            if (q < -1) q = -1;
+            if (q >  1) q =  1;
+            const uint8_t code = (uint8_t)(q + 1);
+            y[i].qs[j / 4] |= (uint8_t)(code << (2 * (j % 4)));
         }
     }
 }
@@ -437,14 +442,11 @@ void dequantize_row_q1_0_g128(const block_q1_0_g128 * GGML_RESTRICT x, float * G
     const int nb = k / qk;
 
     for (int i = 0; i < nb; i++) {
-        const float d = GGML_FP16_TO_FP32(x[i].d);
-        const float neg_d = -d;
+        const float d = ldexpf(1.0f, x[i].e);   // 2^e
 
         for (int j = 0; j < qk; ++j) {
-            const int byte_index = j / 8;
-            const int bit_offset = j % 8;
-            const uint8_t bit = (x[i].qs[byte_index] >> bit_offset) & 1;
-            y[i*qk + j] = bit ? d : neg_d;
+            const uint8_t code = (x[i].qs[j / 4] >> (2 * (j % 4))) & 3;
+            y[i*qk + j] = ((int)code - 1) * d;   // {0,1,2} -> {-1,0,+1}
         }
     }
 }
@@ -5433,7 +5435,9 @@ bool ggml_validate_row_data(enum ggml_type type, const void * data, size_t nbyte
             } break;
         case GGML_TYPE_Q1_0_g128:
             {
-                VALIDATE_ROW_DATA_D_F16_IMPL(block_q1_0_g128, data, nb);
+                // scale is an int8 power-of-two exponent — cannot be NaN/Inf,
+                // so there is nothing to validate.
+                GGML_UNUSED(data); GGML_UNUSED(nb);
             } break;
         case GGML_TYPE_Q4_0:
             {

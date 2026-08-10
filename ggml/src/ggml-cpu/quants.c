@@ -182,31 +182,37 @@ void ggml_vec_dot_q1_0_g128_q8_0_generic(int n, float * GGML_RESTRICT s, size_t 
     
     float sumf = 0.0;
     
-    // Each Q1_0_g128 block has 128 elements, each Q8_0 block has 32 elements
-    // So we need 4 Q8_0 blocks per Q1_0_g128 block
+    // One Q1_0_g128 block spans (QK1_0_g128 / QK8_0) Q8_0 blocks. Derive that
+    // ratio instead of hardcoding 4, so the group size can be retuned by
+    // editing QK1_0_g128 alone — a hardcoded 4 would read past the y buffer.
+    const int nsub = qk / QK8_0;
     for (int i = 0; i < nb; i++) {
-        const float d0 = GGML_FP16_TO_FP32(x[i].d);
-        
+        // Weight scale is a power of two, so it is applied as a shift on the
+        // integer accumulator rather than a float multiply. The whole
+        // weight-side path below is integer: xi is {-1,0,+1}, so each step is
+        // literally add / skip / subtract against an int8 activation.
+        const int e0 = x[i].e;
+
         float sumi = 0.0f;
 
-        for (int k = 0; k < 4; k++) {
-            const float d1 = GGML_FP16_TO_FP32(y[i*4 + k].d);
+        for (int k = 0; k < nsub; k++) {
+            const float d1 = GGML_FP16_TO_FP32(y[i*nsub + k].d);
 
             int sumi_block = 0;
 
             for (int j = 0; j < QK8_0; j++) {
-                const int bit_index = k * QK8_0 + j;
-                const int byte_index = bit_index / 8;
-                const int bit_offset = bit_index % 8;
-
-                const int xi = ((x[i].qs[byte_index] >> bit_offset) & 1) ? 1 : -1;
-                sumi_block += xi * y[i*4 + k].qs[j];
+                const int idx = k * QK8_0 + j;
+                // 2 bits per weight, stored offset by +1: {0,1,2} -> {-1,0,+1}
+                const int xi = (int)((x[i].qs[idx / 4] >> (2 * (idx % 4))) & 3) - 1;
+                sumi_block += xi * y[i*nsub + k].qs[j];
             }
 
+            // Only the activation scale remains floating point. Making that a
+            // shift too requires a power-of-two-scaled activation type.
             sumi += d1 * sumi_block;
         }
 
-        sumf += d0 * sumi;
+        sumf += ldexpf(sumi, e0);   // x * 2^e0 : exponent add, no multiply
     }
     
     *s = sumf;
