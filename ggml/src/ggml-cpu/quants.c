@@ -192,10 +192,10 @@ void ggml_vec_dot_q1_0_##SUFFIX##_q8_0_generic(int n, float * GGML_RESTRICT s, s
     const int nsub = qk / QK8_0;                                                          \
                                                                                           \
     for (int i = 0; i < nb; i++) {                                                        \
-        /* Weight scale is a power of two, applied as a shift on the integer   */         \
-        /* accumulator rather than a float multiply. The weight-side path is   */         \
-        /* fully integer: xi is {-1,0,+1}, so each step is add / skip / sub.   */         \
-        const int e0 = x[i].e;                                                            \
+        /* FP16 weight-group scale (PrismML Q2_0). The MAC loop is still       */         \
+        /* integer -- xi is {-1,0,+1}, add / skip / subtract -- with one       */         \
+        /* float multiply per block applying the scale.                        */         \
+        const float d0 = GGML_FP16_TO_FP32(x[i].d);                                       \
         float sumi = 0.0f;                                                                \
                                                                                           \
         for (int k = 0; k < nsub; k++) {                                                  \
@@ -213,7 +213,7 @@ void ggml_vec_dot_q1_0_##SUFFIX##_q8_0_generic(int n, float * GGML_RESTRICT s, s
             sumi += d1 * sumi_block;                                                      \
         }                                                                                 \
                                                                                           \
-        sumf += ldexpf(sumi, e0);   /* x * 2^e0 : exponent add, no multiply */            \
+        sumf += d0 * sumi;                                                                \
     }                                                                                     \
                                                                                           \
     *s = sumf;                                                                            \

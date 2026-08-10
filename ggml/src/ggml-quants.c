@@ -141,14 +141,10 @@ void quantize_row_q1_0_##SUFFIX##_ref(const float * GGML_RESTRICT x,            
             d = ggml_q1_0_lloyd_scale(x + i*qk, qk, d);                                   \
         }                                                                                 \
                                                                                           \
-        /* Round the scale to the nearest power of two so inference applies it  */        \
-        /* with a bit shift instead of a float multiply. Quantization is        */        \
-        /* offline, so using float here costs nothing at inference time.        */        \
-        int e = (d > 0.0f) ? (int)lrintf(log2f(d)) : -127;                                \
-        if (e < -127) e = -127;                                                           \
-        if (e >  127) e =  127;                                                           \
-        y[i].e = (int8_t)e;                                                               \
-        const float dq = ldexpf(1.0f, e);                                                 \
+        /* FP16 group scale, PrismML Q2_0 style. Stored value is round-tripped */        \
+        /* so quantization sees exactly what dequantization will apply.        */        \
+        y[i].d = GGML_FP32_TO_FP16(d);                                                    \
+        const float dq = GGML_FP16_TO_FP32(y[i].d);                                       \
                                                                                           \
         for (int j = 0; j < qk / 4; ++j) {                                                \
             y[i].qs[j] = 0;                                                               \
@@ -509,7 +505,7 @@ void dequantize_row_q1_0_##SUFFIX(const block_q1_0_##SUFFIX * GGML_RESTRICT x,  
     const int nb = k / qk;                                                                \
                                                                                           \
     for (int i = 0; i < nb; i++) {                                                        \
-        const float d = ldexpf(1.0f, x[i].e);   /* 2^e */                                 \
+        const float d = GGML_FP16_TO_FP32(x[i].d);                                        \
         for (int j = 0; j < qk; ++j) {                                                    \
             const uint8_t code = (x[i].qs[j / 4] >> (2 * (j % 4))) & 3;                   \
             y[i*qk + j] = ((int)code - 1) * d;  /* {0,1,2} -> {-1,0,+1} */                \
@@ -5508,12 +5504,16 @@ bool ggml_validate_row_data(enum ggml_type type, const void * data, size_t nbyte
                 VALIDATE_ROW_DATA_D_F16_IMPL(block_q1_0, data, nb);
             } break;
         case GGML_TYPE_Q1_0_g32:
+            {
+                VALIDATE_ROW_DATA_D_F16_IMPL(block_q1_0_g32, data, nb);
+            } break;
         case GGML_TYPE_Q1_0_g64:
+            {
+                VALIDATE_ROW_DATA_D_F16_IMPL(block_q1_0_g64, data, nb);
+            } break;
         case GGML_TYPE_Q1_0_g128:
             {
-                // scale is an int8 power-of-two exponent — cannot be NaN/Inf,
-                // so there is nothing to validate.
-                GGML_UNUSED(data); GGML_UNUSED(nb);
+                VALIDATE_ROW_DATA_D_F16_IMPL(block_q1_0_g128, data, nb);
             } break;
         case GGML_TYPE_Q4_0:
             {

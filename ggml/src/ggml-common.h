@@ -196,9 +196,9 @@ static_assert(sizeof(block_q1_0) == sizeof(ggml_half) + QK1_0 / 8, "wrong q1_0 b
 //     giving the most sensitive tensor finer scales for ~+0.05 bpw overall.
 //
 // Finer group = more scales = more bits:
-//   g32  -> 1 + 8  =  9 bytes / 32  = 2.25   bpw
-//   g64  -> 1 + 16 = 17 bytes / 64  = 2.125  bpw
-//   g128 -> 1 + 32 = 33 bytes / 128 = 2.0625 bpw
+//   g32  -> 2 + 8  = 10 bytes / 32  = 2.5    bpw
+//   g64  -> 2 + 16 = 18 bytes / 64  = 2.25   bpw
+//   g128 -> 2 + 32 = 34 bytes / 128 = 2.125  bpw   (PrismML Q2_0 layout)
 //
 // Each entry MUST match gguf-py/gguf/constants.py, or Python walks the file at
 // the wrong stride and silently misdecodes every tensor.
@@ -209,10 +209,10 @@ static_assert(sizeof(block_q1_0) == sizeof(ggml_half) + QK1_0 / 8, "wrong q1_0 b
 
 #define GGML_Q1_0_GROUP_BLOCK(SUFFIX)                                          \
     typedef struct {                                                           \
-        int8_t  e;                          /* scale = 2^e */                  \
+        ggml_half d;                        /* FP16 group scale (PrismML) */   \
         uint8_t qs[QK1_0_##SUFFIX / 4];     /* 2 bits per weight */            \
     } block_q1_0_##SUFFIX;                                                     \
-    static_assert(sizeof(block_q1_0_##SUFFIX) == sizeof(int8_t) + QK1_0_##SUFFIX / 4, \
+    static_assert(sizeof(block_q1_0_##SUFFIX) == sizeof(ggml_half) + QK1_0_##SUFFIX / 4, \
                   "wrong q1_0_" #SUFFIX " block size/padding");
 
 GGML_Q1_0_GROUP_BLOCK(g32)
