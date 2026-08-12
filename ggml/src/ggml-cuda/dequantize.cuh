@@ -24,26 +24,40 @@ static __device__ __forceinline__ void dequantize_q1_0(const void * vx, const in
 }
 
 static __device__ __forceinline__ void dequantize_q1_0_g128(const void * vx, const int64_t ib, const int iqs, float2 & v){
+    // Ternary 2-bit codes, FP16 group scale (PrismML Q2_0 layout, commit
+    // 10e988bbf). code = state+1 in {0,1,2}; w = d * (code - 1). QR == 1 so
+    // this thread's pair is ADJACENT: elements iqs and iqs+1.
     const block_q1_0_g128 * x = (const block_q1_0_g128 *) vx;
 
-    const float d = x[ib].d;
-    const float neg_d = -d;
+    const float d = __half2float(*((const half *) &x[ib].d));
 
-    const int bit_index_0 = iqs;
-    const int bit_index_1 = iqs + 1;
+    const int j0 = iqs;
+    const int j1 = iqs + 1;
+    const int c0 = (x[ib].qs[j0/4] >> (2*(j0 % 4))) & 3;
+    const int c1 = (x[ib].qs[j1/4] >> (2*(j1 % 4))) & 3;
 
-    const int byte_index_0 = bit_index_0 / 8;
-    const int bit_offset_0 = bit_index_0 % 8;
+    v.x = d * (float)(c0 - 1);
+    v.y = d * (float)(c1 - 1);
+}
 
-    const int byte_index_1 = bit_index_1 / 8;
-    const int bit_offset_1 = bit_index_1 % 8;
+static __device__ __forceinline__ void dequantize_q1_0_g32(const void * vx, const int64_t ib, const int iqs, float2 & v){
+    const block_q1_0_g32 * x = (const block_q1_0_g32 *) vx;
+    const float d = __half2float(*((const half *) &x[ib].d));
+    const int j0 = iqs, j1 = iqs + 1;
+    const int c0 = (x[ib].qs[j0/4] >> (2*(j0 % 4))) & 3;
+    const int c1 = (x[ib].qs[j1/4] >> (2*(j1 % 4))) & 3;
+    v.x = d * (float)(c0 - 1);
+    v.y = d * (float)(c1 - 1);
+}
 
-    // Extract bits: 1 = +d, 0 = -d
-    const uint8_t bit_0 = (x[ib].qs[byte_index_0] >> bit_offset_0) & 1;
-    const uint8_t bit_1 = (x[ib].qs[byte_index_1] >> bit_offset_1) & 1;
-
-    v.x = bit_0 ? d : neg_d;
-    v.y = bit_1 ? d : neg_d;
+static __device__ __forceinline__ void dequantize_q1_0_g64(const void * vx, const int64_t ib, const int iqs, float2 & v){
+    const block_q1_0_g64 * x = (const block_q1_0_g64 *) vx;
+    const float d = __half2float(*((const half *) &x[ib].d));
+    const int j0 = iqs, j1 = iqs + 1;
+    const int c0 = (x[ib].qs[j0/4] >> (2*(j0 % 4))) & 3;
+    const int c1 = (x[ib].qs[j1/4] >> (2*(j1 % 4))) & 3;
+    v.x = d * (float)(c0 - 1);
+    v.y = d * (float)(c1 - 1);
 }
 
 static __device__ __forceinline__ void dequantize_q4_0(const void * vx, const int64_t ib, const int iqs, float2 & v){

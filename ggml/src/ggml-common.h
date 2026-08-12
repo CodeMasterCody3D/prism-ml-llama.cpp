@@ -97,7 +97,12 @@ typedef sycl::half2 ggml_half2;
 #define QR1_0 1              // 1 bit per quantized element (matches the 1-bit nature of Q1_0)
 
 #define QI1_0_g128 (QK1_0_g128 / 32)  // Number of int32s needed for QK1_0_g128 bits (QK1_0_g128/32)
-#define QR1_0_g128 1              // 1 bit per quantized element (matches the 1-bit nature of Q1_0_g128)
+#define QR1_0_g128 1              // adjacent-pair dequant (v.x=j, v.y=j+1)
+
+#define QI1_0_g32 (QK1_0_g32 / 32)
+#define QR1_0_g32 1
+#define QI1_0_g64 (QK1_0_g64 / 32)
+#define QR1_0_g64 1
 
 
 #define QI4_0 (QK4_0 / (4 * QR4_0))

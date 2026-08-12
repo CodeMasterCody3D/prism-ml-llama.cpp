@@ -277,9 +277,9 @@ bool ggml_cuda_should_use_mmq(enum ggml_type type, int cc, int64_t ne11, int64_t
     bool mmq_supported;
 
     switch (type) {
-        // TODO: Q1_0 and Q1_0_g128 MMQ implementation exists but is currently disabled due to accuracy issues
-        case GGML_TYPE_Q1_0:
-        case GGML_TYPE_Q1_0_g128:
+        // Q1_0 / Q1_0_g* NOT mmq-supported: the tile loaders are binary-era
+        // and the accuracy TODO below was real — they fall back to the
+        // dequantize+GEMM path, which is correct.
         case GGML_TYPE_Q4_0:
         case GGML_TYPE_Q4_1:
         case GGML_TYPE_Q5_0:
