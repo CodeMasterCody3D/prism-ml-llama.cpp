@@ -238,6 +238,26 @@ static constexpr __host__ __device__ int get_mmvq_mmid_max_batch_rdna4(ggml_type
 
 // Host function: returns the max batch size for the current arch+type at runtime.
 int get_mmvq_mmid_max_batch(ggml_type type, int cc) {
+    // Q1_0 / Q1_0_g*: the mmvq vec_dot kernels for these types are BINARY-era
+    // (plain Q1_0 was a 1-bit sign format) and were never converted to 2-bit
+    // ternary. ggml_cuda_mul_mat already excludes them from mmvq/mmq for dense
+    // matmul, but MUL_MAT_ID reached them through this table -- silently wrong
+    // results for g128, GGML_ABORT for g32/g64 (no switch case), the moment a
+    // ternary MoE ran with -ngl > 0. Returning 0 keeps MUL_MAT_ID off the mmvq
+    // path on EVERY architecture (ne2 >= 1 > 0), falling through to the correct
+    // per-expert dequantize + cuBLAS path. It also (correctly) disables CUDA
+    // graphs for these nodes, which need the non-mmvq sync path.
+    // Remove this guard only together with real 2-bit ternary mmvq kernels.
+    switch (type) {
+        case GGML_TYPE_Q1_0:
+        case GGML_TYPE_Q1_0_g32:
+        case GGML_TYPE_Q1_0_g64:
+        case GGML_TYPE_Q1_0_g128:
+            return 0;
+        default:
+            break;
+    }
+
     // NVIDIA: Volta, Ada Lovelace, and Blackwell always use MMVQ for MUL_MAT_ID.
     if (GGML_CUDA_CC_IS_NVIDIA(cc)) {
         if (cc == GGML_CUDA_CC_VOLTA || cc >= GGML_CUDA_CC_ADA_LOVELACE) {
