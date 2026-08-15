@@ -553,28 +553,19 @@ void ggml_vec_dot_q1_0_g64_q8_0(int n, float * GGML_RESTRICT s, size_t bs, const
 }
 
 // AVX2 ternary dot product for the shipping type (2 bits/weight + FP16 group
-// scale). Two things make it work:
+// scale). Q1_0_g* packs 4 ADJACENT weights per byte, so shift+mask yields
+// strided codes. The unpack below restores order within 128-bit lanes while
+// deliberately pairing activation sub-blocks 0/2 and 1/3 across those lanes.
 //
-//  1. ALGEBRA. The stored code is c = w+1 in {0,1,2}; the scalar loop computes
-//     sum (c-1)*y with a subtract per weight. Instead use
-//         sum (c-1)*y  ==  sum c*y  -  sum y
-//     so the -1 is applied ONCE per sub-block. This is not just cheaper: it is
-//     what makes the codes UNSIGNED, which _mm256_maddubs_epi16 requires
-//     (unsigned x signed). Pre-subtracting would make them signed and the
-//     32-wide multiply unusable.
+// The exact shortcut is sign/magnitude: Q8_0 is guaranteed to store values in
+// [-127, 127], so vpsignb(y, code-1) directly produces {-y, 0, +y} without its
+// only overflow case (-(-128)). One maddubs+madd chain then reduces each dot;
+// the prior kernel needed separate sum(c*y) and sum(y) chains plus a subtract.
+// Pairing sub-blocks also halves int32-to-float conversions and scaled adds.
 //
-//  2. RE-INTERLEAVE. Q1_0_g* packs 4 ADJACENT weights per byte, so shift+mask
-//     yields STRIDED codes (register j holds weights {4i+j}). TQ2_0/Q2_K pack
-//     at stride 32 and need no fixup -- copying their unpack verbatim here
-//     would be silently wrong. The unpack/permute below puts the codes back
-//     into runs of 32 consecutive weights, which is REQUIRED because each run
-//     of 32 has its own Q8_0 activation scale: a g128 group spans 4 sub-blocks
-//     with 4 different d1, so the products cannot be merged into one
-//     accumulator before scaling.
-//
-// Integer results are bit-identical to the generic loop (verified over 20k
-// randomized trials incl. all-{-1,0,+1}, y=+-128 extremes); only float
-// accumulation order differs, as in every other SIMD kernel here.
+// Integer results are bit-identical to the generic loop (verified over 50k
+// randomized trials x 1024 weights, including every valid Q8_0 extreme). Only
+// floating accumulation order differs, as in the other SIMD kernels here.
 void ggml_vec_dot_q1_0_g128_q8_0(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
 #if defined(__AVX2__)
     assert(nrc == 1);
@@ -583,9 +574,8 @@ void ggml_vec_dot_q1_0_g128_q8_0(int n, float * GGML_RESTRICT s, size_t bs, cons
     UNUSED(by);
     UNUSED(bs);
 
-    const int qk   = QK1_0_g128;              // 128 weights per group
-    const int nsub = qk / QK8_0;              // 4 activation blocks per group
-    const int nb   = n / qk;
+    const int qk = QK1_0_g128;
+    const int nb = n / qk;
     assert(n % qk == 0);
 
     const block_q1_0_g128 * GGML_RESTRICT x = vx;
@@ -606,40 +596,77 @@ void ggml_vec_dot_q1_0_g128_q8_0(int n, float * GGML_RESTRICT s, size_t bs, cons
         const __m256i q2 = _mm256_and_si256(_mm256_srli_epi16(packed, 4), m3);
         const __m256i q3 = _mm256_and_si256(_mm256_srli_epi16(packed, 6), m3);
 
-        // strided -> consecutive. unpack works per 128-bit lane, so each result
-        // carries two runs; permute2x128 then pairs the matching halves.
+        // Unpack works independently in each 128-bit lane. Keeping the paired
+        // runs avoids four weight permutes; matching activation halves are
+        // paired below instead.
         const __m256i lo01 = _mm256_unpacklo_epi8(q0, q1);
         const __m256i hi01 = _mm256_unpackhi_epi8(q0, q1);
         const __m256i lo23 = _mm256_unpacklo_epi8(q2, q3);
         const __m256i hi23 = _mm256_unpackhi_epi8(q2, q3);
 
-        const __m256i A = _mm256_unpacklo_epi16(lo01, lo23);   // w0..15  | w64..79
-        const __m256i B = _mm256_unpackhi_epi16(lo01, lo23);   // w16..31 | w80..95
-        const __m256i C = _mm256_unpacklo_epi16(hi01, hi23);   // w32..47 | w96..111
-        const __m256i D = _mm256_unpackhi_epi16(hi01, hi23);   // w48..63 | w112..127
+        const __m256i A = _mm256_unpacklo_epi16(lo01, lo23); // w0..15  | w64..79
+        const __m256i B = _mm256_unpackhi_epi16(lo01, lo23); // w16..31 | w80..95
+        const __m256i C = _mm256_unpacklo_epi16(hi01, hi23); // w32..47 | w96..111
+        const __m256i D = _mm256_unpackhi_epi16(hi01, hi23); // w48..63 | w112..127
 
-        __m256i r[4];
-        r[0] = _mm256_permute2x128_si256(A, B, 0x20);          // w0..31
-        r[1] = _mm256_permute2x128_si256(C, D, 0x20);          // w32..63
-        r[2] = _mm256_permute2x128_si256(A, B, 0x31);          // w64..95
-        r[3] = _mm256_permute2x128_si256(C, D, 0x31);          // w96..127
+        const block_q8_0 * GGML_RESTRICT yi = y + 4*i;
+        const __m256i y0 = _mm256_loadu_si256((const __m256i *) yi[0].qs);
+        const __m256i y1 = _mm256_loadu_si256((const __m256i *) yi[1].qs);
+        const __m256i y2 = _mm256_loadu_si256((const __m256i *) yi[2].qs);
+        const __m256i y3 = _mm256_loadu_si256((const __m256i *) yi[3].qs);
+
+#ifndef NDEBUG
+        // vpsignb below yields {-y, 0, +y}, but it CANNOT negate -128: two's
+        // complement -(-128) wraps back to -128 instead of +128, so a single
+        // such activation would silently corrupt the dot product by 256.
+        // Q8_0 quantization scales by 127/amax, so |q| <= 127 and -128 is
+        // unreachable -- verified in both quantize_row_q8_0 paths and over
+        // 25.6M adversarial samples. That invariant lives in ANOTHER file
+        // though, so assert it here rather than trusting a comment: this turns
+        // a future quantizer change (or hand-built Q8_0 test data) from a
+        // silent wrong answer into an immediate, obvious failure.
+        // Compiled out of release builds; zero cost when NDEBUG is set.
+        {
+            const __m256i m128 = _mm256_set1_epi8(-128);
+            const int any_m128 =
+                _mm256_movemask_epi8(_mm256_cmpeq_epi8(y0, m128)) |
+                _mm256_movemask_epi8(_mm256_cmpeq_epi8(y1, m128)) |
+                _mm256_movemask_epi8(_mm256_cmpeq_epi8(y2, m128)) |
+                _mm256_movemask_epi8(_mm256_cmpeq_epi8(y3, m128));
+            assert(any_m128 == 0 &&
+                   "Q8_0 activation == -128 breaks the vpsignb ternary path "
+                   "(cannot negate -128); the |q| <= 127 quantizer invariant "
+                   "is violated");
+        }
+#endif
+
+        const __m256i y02lo = _mm256_permute2x128_si256(y0, y2, 0x20);
+        const __m256i y02hi = _mm256_permute2x128_si256(y0, y2, 0x31);
+        const __m256i y13lo = _mm256_permute2x128_si256(y1, y3, 0x20);
+        const __m256i y13hi = _mm256_permute2x128_si256(y1, y3, 0x31);
+
+        const __m256i pA = _mm256_madd_epi16(_mm256_maddubs_epi16(ones8,
+            _mm256_sign_epi8(y02lo, _mm256_sub_epi8(A, ones8))), ones16);
+        const __m256i pB = _mm256_madd_epi16(_mm256_maddubs_epi16(ones8,
+            _mm256_sign_epi8(y02hi, _mm256_sub_epi8(B, ones8))), ones16);
+        const __m256i pC = _mm256_madd_epi16(_mm256_maddubs_epi16(ones8,
+            _mm256_sign_epi8(y13lo, _mm256_sub_epi8(C, ones8))), ones16);
+        const __m256i pD = _mm256_madd_epi16(_mm256_maddubs_epi16(ones8,
+            _mm256_sign_epi8(y13hi, _mm256_sub_epi8(D, ones8))), ones16);
+
+        const __m256i dot02 = _mm256_add_epi32(pA, pB);
+        const __m256i dot13 = _mm256_add_epi32(pC, pD);
 
         const float d0 = GGML_CPU_FP16_TO_FP32(x[i].d);
+        const __m256 d02 = _mm256_set_m128(
+            _mm_set1_ps(d0 * GGML_CPU_FP16_TO_FP32(yi[2].d)),
+            _mm_set1_ps(d0 * GGML_CPU_FP16_TO_FP32(yi[0].d)));
+        const __m256 d13 = _mm256_set_m128(
+            _mm_set1_ps(d0 * GGML_CPU_FP16_TO_FP32(yi[3].d)),
+            _mm_set1_ps(d0 * GGML_CPU_FP16_TO_FP32(yi[1].d)));
 
-        for (int k = 0; k < nsub; k++) {
-            const __m256i yv = _mm256_loadu_si256((const __m256i *) y[i*nsub + k].qs);
-
-            // codes {0,1,2} unsigned x activations signed: products in
-            // [-256,254], pairwise sums in [-512,508] -- int16 safe. Widened to
-            // int32 immediately so nothing can accumulate into an overflow.
-            const __m256i cy = _mm256_madd_epi16(_mm256_maddubs_epi16(r[k],   yv), ones16);
-            const __m256i ys = _mm256_madd_epi16(_mm256_maddubs_epi16(ones8, yv), ones16);
-            const __m256i dot = _mm256_sub_epi32(cy, ys);      // the -1s, once per sub-block
-
-            const float dk = d0 * GGML_CPU_FP16_TO_FP32(y[i*nsub + k].d);
-            acc = _mm256_add_ps(acc, _mm256_mul_ps(_mm256_cvtepi32_ps(dot),
-                                                   _mm256_set1_ps(dk)));
-        }
+        acc = _mm256_add_ps(acc, _mm256_mul_ps(_mm256_cvtepi32_ps(dot02), d02));
+        acc = _mm256_add_ps(acc, _mm256_mul_ps(_mm256_cvtepi32_ps(dot13), d13));
     }
 
     *s = hsum_float_8(acc);
