@@ -4946,12 +4946,27 @@ static vk_device ggml_vk_get_device(size_t idx) {
 
         // Implementing the async backend interfaces seems broken on older Intel HW,
         // see https://github.com/ggml-org/llama.cpp/issues/17302.
-        device->support_async = (device->vendor_id != VK_VENDOR_ID_INTEL ||
-                                 std::string(device->properties.deviceName.data()).find("(DG1)") == std::string::npos) &&
+        const bool async_broken_intel = device->vendor_id == VK_VENDOR_ID_INTEL &&
+                                 std::string(device->properties.deviceName.data()).find("(DG1)") != std::string::npos;
+
+        // The async path also corrupts split-boundary input copies on GCN iGPUs
+        // under RADV (observed on Renoir/Vega: partially-visible copies during
+        // partial offload produce garbage tokens; sync path is correct). Same
+        // failure class as the Intel issue above, so use the same remedy.
+        // Heavily exercised by models whose weight types the Vulkan backend does
+        // not support (e.g. ternary Q1_0_g*), where every layer splits between
+        // CPU matmuls and GPU norms/attention.
+        const bool async_broken_amd_gcn_igpu = device->vendor_id == VK_VENDOR_ID_AMD &&
+                                 device->architecture == vk_device_architecture::AMD_GCN &&
+                                 device->driver_id == vk::DriverId::eMesaRadv &&
+                                 device->properties.deviceType == vk::PhysicalDeviceType::eIntegratedGpu;
+
+        device->support_async = !async_broken_intel &&
+                                !async_broken_amd_gcn_igpu &&
                                 getenv("GGML_VK_DISABLE_ASYNC") == nullptr;
 
         if (!device->support_async) {
-            GGML_LOG_DEBUG("ggml_vulkan: WARNING: Async execution disabled on certain Intel devices.\n");
+            GGML_LOG_DEBUG("ggml_vulkan: WARNING: Async execution disabled on this device.\n");
         }
 
         const char* GGML_VK_FORCE_MAX_ALLOCATION_SIZE = getenv("GGML_VK_FORCE_MAX_ALLOCATION_SIZE");
@@ -15164,9 +15179,34 @@ static ggml_backend_t ggml_backend_vk_device_init(ggml_backend_dev_t dev, const 
     return ggml_backend_vk_init(ctx->device);
 }
 
+// The Vulkan backend has no shaders for the ternary Q1_0 family. All type
+// switches below already fall through to unsupported for them, but refuse them
+// explicitly up front so the scheduler reliably falls back to the CPU for any
+// op touching these types, even if a generic quantized path is added later.
+static bool ggml_vk_is_unsupported_quant_type(ggml_type type) {
+    switch (type) {
+        case GGML_TYPE_Q1_0:
+        case GGML_TYPE_Q1_0_g32:
+        case GGML_TYPE_Q1_0_g64:
+        case GGML_TYPE_Q1_0_g128:
+            return true;
+        default:
+            return false;
+    }
+}
+
 static bool ggml_backend_vk_device_supports_op(ggml_backend_dev_t dev, const ggml_tensor * op) {
     ggml_backend_vk_device_context * ctx = (ggml_backend_vk_device_context *)dev->context;
     const vk_device& device = ggml_vk_get_device(ctx->device);
+
+    if (ggml_vk_is_unsupported_quant_type(op->type)) {
+        return false;
+    }
+    for (int i = 0; i < GGML_MAX_SRC; i++) {
+        if (op->src[i] && ggml_vk_is_unsupported_quant_type(op->src[i]->type)) {
+            return false;
+        }
+    }
 
     const bool uses_bda = (op->op == GGML_OP_IM2COL || op->op == GGML_OP_IM2COL_3D) &&
                           device->shader_int64 && device->buffer_device_address;
