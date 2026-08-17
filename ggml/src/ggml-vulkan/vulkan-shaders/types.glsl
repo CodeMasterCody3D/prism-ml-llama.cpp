@@ -222,6 +222,31 @@ struct block_q8_1_x4_packed128
     ivec4 qs[8];
 };
 
+// Ternary Q1_0_g128 (PrismML Q2_0 layout): FP16 group scale + 2-bit codes,
+// code c in {0,1,2}, weight = d * (c - 1). 128 elements per block.
+#define QUANT_K_Q1_0_G128 128
+#define QUANT_R_Q1_0_G128 1
+
+struct block_q1_0_g128
+{
+    float16_t d;
+    uint8_t qs[32];
+};
+
+struct block_q1_0_g128_packed16
+{
+    float16_t d;
+    uint16_t qs[32/2];
+};
+
+#if defined(DATA_A_Q1_0_G128)
+#define QUANT_K QUANT_K_Q1_0_G128
+#define QUANT_R QUANT_R_Q1_0_G128
+#define QUANT_AUXF 1
+#define A_TYPE block_q1_0_g128
+#define A_TYPE_PACKED16 block_q1_0_g128_packed16
+#endif
+
 // K-quants
 #define QUANT_K_Q2_K 256
 

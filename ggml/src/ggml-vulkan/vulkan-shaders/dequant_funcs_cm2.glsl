@@ -109,6 +109,22 @@ float16_t dequantFuncQ8_0(const in decodeBufQ8_0 bl, const in uint blockCoords[2
     return ret;
 }
 
+layout(buffer_reference, std430, buffer_reference_align = 2) buffer decodeBufQ1_0_G128 {
+   block_q1_0_g128_packed16 block;
+};
+
+float16_t dequantFuncQ1_0_G128(const in decodeBufQ1_0_G128 bl, const in uint blockCoords[2], const in uint coordInBlock[2])
+{
+    // Ternary 2-bit codes; element j has code (qs[j/4] >> (2*(j%4))) & 3 and
+    // weight d * (code - 1). Eight consecutive codes share one uint16.
+    const float16_t d = bl.block.d;
+    const uint idx = coordInBlock[1];
+
+    const uint code = (uint(bl.block.qs[idx >> 3]) >> (2 * (idx & 7))) & 3;
+    float16_t ret = d * float16_t(int(code) - 1);
+    return ret;
+}
+
 layout(buffer_reference, std430, buffer_reference_align = 4) buffer decodeBufQ2_K {
    block_q2_K block;
 };
@@ -695,6 +711,8 @@ float16_t dequantFuncMXFP4(const in decodeBufMXFP4 bl, const in uint blockCoords
 #define dequantFuncA dequantFuncQ5_1
 #elif defined(DATA_A_Q8_0)
 #define dequantFuncA dequantFuncQ8_0
+#elif defined(DATA_A_Q1_0_G128)
+#define dequantFuncA dequantFuncQ1_0_G128
 #elif defined(DATA_A_Q2_K)
 #define dequantFuncA dequantFuncQ2_K
 #elif defined(DATA_A_Q3_K)

@@ -130,6 +130,20 @@ void load_a_to_shmem(const uint pos_a, const uint row, const uint col, const uin
 
             buf_a[buf_idx    ] = FLOAT_TYPE_VEC2(v.xy);
             buf_a[buf_idx + 1] = FLOAT_TYPE_VEC2(v.zw);
+#elif defined(DATA_A_Q1_0_G128)
+            const uint idx = pos_a + col * p.stride_a / LOAD_VEC_A + row;
+            const uint buf_idx = col * SHMEM_STRIDE + row * LOAD_VEC_A / 2;
+
+            const uint ib = idx / 32;    // 4 values per idx, 128 per block
+            const uint iqs = idx & 0x1F; // byte index within the block
+
+            // ternary: code c in {0,1,2}, weight = d * (c - 1)
+            const float d = float(data_a_packed16[ib].d);
+            const uint vui = (uint(data_a_packed16[ib].qs[iqs >> 1]) >> (8 * (iqs & 1))) & 0xFF;
+            const vec4 v = (vec4(vui & 3, (vui >> 2) & 3, (vui >> 4) & 3, vui >> 6) - 1.0f) * d;
+
+            buf_a[buf_idx    ] = FLOAT_TYPE_VEC2(v.xy);
+            buf_a[buf_idx + 1] = FLOAT_TYPE_VEC2(v.zw);
 #elif defined(DATA_A_Q2_K)
             const uint idx = pos_a + col * p.stride_a / LOAD_VEC_A + row;
             const uint buf_idx = col * SHMEM_STRIDE + row * LOAD_VEC_A / 2;
