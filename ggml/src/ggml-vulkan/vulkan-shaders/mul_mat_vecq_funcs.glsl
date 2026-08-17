@@ -132,6 +132,35 @@ FLOAT_TYPE mul_q8_1(const int32_t q_sum, const float da, const vec2 dsb, const i
 }
 #endif
 
+#if defined(DATA_A_Q1_0_G128)
+// Ternary 2-bit codes (c in {0,1,2}), FP16 group scale: w = d * (c - 1).
+// Integer path WITHOUT GL_EXT_integer_dot_product: unpack the q8_1 activation
+// bytes and accumulate (c - 1) * q in int32 - the same signed-ternary math as
+// the CPU AVX2 kernel. K_PER_ITER == 16, so each call covers 16 elements:
+// one 4-byte code word against cache_b_qs[0..3].
+FLOAT_TYPE mmvq_dot_product(const uint ib_a, const uint iqs) {
+    // ib_a counts 32-element (QUANT_K_Q8_1) sub-blocks; 4 per ternary block
+    const uint ib_a_outer = ib_a / 4;
+    // 4-byte code word for this thread's 16 elements (2 words per sub-block)
+    const uint qw_idx = (ib_a % 4) * 2 + iqs;
+
+    const uint32_t codes = uint32_t(data_a_packed16[ib_a_outer].qs[qw_idx * 2])
+                         | (uint32_t(data_a_packed16[ib_a_outer].qs[qw_idx * 2 + 1]) << 16);
+
+    int32_t q_sum = 0;
+    [[unroll]] for (uint l = 0; l < 4; ++l) {
+        const uint32_t cw = codes >> (8 * l);
+        const ivec4 c = ivec4(cw & 3, (cw >> 2) & 3, (cw >> 4) & 3, (cw >> 6) & 3);
+        const ivec4 q = ivec4(unpack8(cache_b_qs[l]));
+        const ivec4 prod = (c - 1) * q;
+        q_sum += prod.x + prod.y + prod.z + prod.w;
+    }
+
+    // signed accumulation means no ds.y (sum) correction term is needed
+    return FLOAT_TYPE(float(data_a[ib_a_outer].d) * cache_b_ds.x * float(q_sum));
+}
+#endif
+
 #if defined(DATA_A_QUANT_LEGACY) || defined(DATA_A_MXFP4)
 FLOAT_TYPE mmvq_dot_product(const uint ib_a, const uint iqs) {
     int32_t q_sum = 0;
