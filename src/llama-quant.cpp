@@ -398,6 +398,11 @@ static ggml_type tensor_type_fallback(quantize_state_impl & qs, const ggml_tenso
             case GGML_TYPE_Q4_K:    return_type = GGML_TYPE_Q5_0;   break;
             case GGML_TYPE_Q5_K:    return_type = GGML_TYPE_Q5_1;   break;
             case GGML_TYPE_Q6_K:    return_type = GGML_TYPE_Q8_0;   break;
+            // A row whose width is not a multiple of 128 was never ternarized
+            // by the forge, so there is no ternary grid to preserve here and
+            // no reason to introduce NEW error: fall back to lossless F16
+            // rather than to a lossy quant.
+            case GGML_TYPE_Q1_0_g128: return_type = GGML_TYPE_F16;    break;
             default:
                 if (qk_k <= 32) {
                     // the target is already a 32-block type, so there is no smaller block to demote to
@@ -456,6 +461,14 @@ static ggml_type llama_tensor_get_type_impl(quantize_state_impl & qs, ggml_type 
     if (category == tensor_category::OUTPUT || (qs.has_tied_embeddings && category == tensor_category::TOKEN_EMBD)) {
         if (qs.params->output_tensor_type < GGML_TYPE_COUNT) {
             new_type = qs.params->output_tensor_type;
+        } else if (ftype == LLAMA_FTYPE_MOSTLY_Q1_0_g128) {
+            // Q1_0_g128 sources are ALREADY on the ternary grid: the weights
+            // were ternarized upstream and this pass only re-packs them. The
+            // default rule below would promote output.weight to Q6_K, which
+            // silently turns an all-ternary model into a mixed one -- the head
+            // is a tensor we deliberately paid to ternarize, not one to
+            // "protect". Keep it, unless the row width forbids the block size
+            // (handled by tensor_type_fallback).
         } else {
             const int64_t nx = tensor->ne[0];
             const int64_t qk_k = ggml_blck_size(new_type);
@@ -504,6 +517,13 @@ static ggml_type llama_tensor_get_type_impl(quantize_state_impl & qs, ggml_type 
             }
             else if (ftype == LLAMA_FTYPE_MOSTLY_TQ1_0 || ftype == LLAMA_FTYPE_MOSTLY_TQ2_0 || ftype == LLAMA_FTYPE_MOSTLY_Q2_0) {
                 new_type = GGML_TYPE_Q4_K;
+            }
+            else if (ftype == LLAMA_FTYPE_MOSTLY_Q1_0_g128) {
+                // Same reasoning as the output tensor above: the embedding is
+                // already ternary on the g128 grid, so keep it there. Pinned
+                // explicitly rather than left to fall through this chain, so a
+                // future branch cannot capture it by accident.
+                new_type = GGML_TYPE_Q1_0_g128;
             }
         }
     } else if (ftype == LLAMA_FTYPE_MOSTLY_IQ2_XXS || ftype == LLAMA_FTYPE_MOSTLY_IQ2_XS || ftype == LLAMA_FTYPE_MOSTLY_IQ1_S ||
@@ -856,6 +876,7 @@ ggml_type llama_ftype_get_default_type(llama_ftype ftype) {
         case LLAMA_FTYPE_ALL_F32:     return GGML_TYPE_F32;
         case LLAMA_FTYPE_MOSTLY_Q1_0: return GGML_TYPE_Q1_0;
         case LLAMA_FTYPE_MOSTLY_Q2_0: return GGML_TYPE_Q2_0;
+        case LLAMA_FTYPE_MOSTLY_Q1_0_g128: return GGML_TYPE_Q1_0_g128;
 
         case LLAMA_FTYPE_MOSTLY_MXFP4_MOE: return GGML_TYPE_MXFP4;
 

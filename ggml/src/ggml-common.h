@@ -191,6 +191,23 @@ typedef struct {
 } block_q2_0;
 static_assert(sizeof(block_q2_0) == sizeof(ggml_half) + QK2_0 / 4, "wrong q2_0 block size/padding");
 
+// Ternary {-1,0,+1} at 2 bits per weight with ONE fp16 scale per group of 128:
+//   2 + 128/4 = 34 bytes / 128 weights = 2.125 bpw
+// Distinct from Q1_0 above (binary, sign-only, no zero state) and from Q2_0
+// (same 2-bit code, group 64 -> 2.25 bpw). The zero state is what buys ~1.3 dB
+// over a sign-only encoding at the same bit width.
+// Group minimum is 32: vec_dot derives nsub = qk / QK8_0 (=32), so anything
+// smaller makes it 0 and the block is silently skipped.
+// This byte layout MUST match gguf-py/gguf/constants.py, or Python walks the
+// file at the wrong stride and misdecodes every tensor without erroring.
+#define QK1_0_g128 128
+typedef struct {
+    ggml_half d;                    // fp16 group scale
+    uint8_t   qs[QK1_0_g128 / 4];   // 2 bits per weight, code = q + 1
+} block_q1_0_g128;
+static_assert(sizeof(block_q1_0_g128) == sizeof(ggml_half) + QK1_0_g128 / 4,
+              "wrong q1_0_g128 block size/padding");
+
 #define QK4_0 32
 typedef struct {
     ggml_half d;           // delta

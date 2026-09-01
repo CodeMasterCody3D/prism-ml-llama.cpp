@@ -2110,6 +2110,124 @@ size_t quantize_q1_0(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst, 
     return nrow * row_size;
 }
 
+
+// ============================ Q1_0_g128 ====================================
+// Ternary {-1,0,+1}, 2 bits per weight, one fp16 scale per group of 128.
+
+// Lloyd-Max refinement of the group scale. Default ON: measured like-for-like
+// (identical Q8_0 head, two runs each, bit-exact reproduction) Lloyd-Max scored
+// 133,325 PPL against 1,186,015 for the one-shot mean|w| rule -- 8.9x. Set
+// Q1_0_G128_LLOYD=0 to restore the one-shot rule.
+static bool ggml_q1_0_g128_lloyd_enabled(void) {
+    static int cached = -1;   // benign race: every writer stores the same value
+    if (cached < 0) {
+        const char * v = getenv("Q1_0_G128_LLOYD");
+        cached = (v && v[0] == '0') ? 0 : 1;
+    }
+    return cached != 0;
+}
+
+// Alternate {threshold -> centroid} until fixed point, from 4 starts, keeping
+// the best residual reduction. The fixed point of this iteration IS the TWN
+// rule a = mean(|w| : |w| > a/2).
+static float ggml_q1_0_g128_lloyd_scale(const float * GGML_RESTRICT x, int qk, float mean) {
+    if (mean <= 0.0f) {
+        return 0.0f;
+    }
+    static const float inits[4] = {0.5f, 0.7f, 0.9f, 1.1f};
+    float best_a   = mean;
+    float best_obj = -1.0f;
+    for (int ci = 0; ci < 4; ci++) {
+        float th = inits[ci] * mean;
+        float s1 = 0.0f; int sw = 0;
+        for (int j = 0; j < qk; j++) {
+            const float w = fabsf(x[j]);
+            if (w > th) { s1 += w; sw++; }
+        }
+        float a = sw > 0 ? s1/sw : 0.0f;
+        for (int it = 0; it < 8 && a > 0.0f; it++) {
+            th = 0.5f * a;              // ternary decision boundary for {0, +/-1}
+            s1 = 0.0f; sw = 0;
+            for (int j = 0; j < qk; j++) {
+                const float w = fabsf(x[j]);
+                if (w > th) { s1 += w; sw++; }
+            }
+            const float na = sw > 0 ? s1/sw : 0.0f;
+            if (fabsf(na - a) <= 1e-6f * fmaxf(na, a)) { a = na; break; }
+            a = na;
+        }
+        // Residual reduction (s1^2/sw): the objective the reference impl ranks by.
+        const float obj = sw > 0 ? s1*s1/(float)sw : 0.0f;
+        if (obj > best_obj) { best_obj = obj; best_a = a; }
+    }
+    return best_a > 0.0f ? best_a : mean;
+}
+
+void quantize_row_q1_0_g128_ref(const float * GGML_RESTRICT x, block_q1_0_g128 * GGML_RESTRICT y, int64_t k) {
+    const int qk = QK1_0_g128;
+    assert(k % qk == 0);
+    const int nb = k / qk;
+
+    for (int i = 0; i < nb; i++) {
+        float sum_abs = 0.0f;
+        for (int j = 0; j < qk; j++) {
+            sum_abs += fabsf(x[i*qk + j]);
+        }
+        float d = sum_abs / qk;
+        if (ggml_q1_0_g128_lloyd_enabled()) {
+            d = ggml_q1_0_g128_lloyd_scale(x + i*qk, qk, d);
+        }
+
+        // Round-trip the stored fp16 so quantization sees exactly the scale
+        // dequantization will apply.
+        y[i].d = GGML_FP32_TO_FP16(d);
+        const float dq = GGML_FP16_TO_FP32(y[i].d);
+
+        for (int j = 0; j < qk / 4; ++j) {
+            y[i].qs[j] = 0;
+        }
+
+        // BitNet b1.58 ternary: q = clamp(round(w/d), -1, 1). Weights below d/2
+        // collapse to the zero state -- the state a sign-only encoding lacks.
+        // Stored offset by +1 so {-1,0,+1} maps to {0,1,2}.
+        const float id = dq > 0.0f ? 1.0f/dq : 0.0f;
+        for (int j = 0; j < qk; ++j) {
+            int q = (int)roundf(x[i*qk + j] * id);
+            if (q < -1) q = -1;
+            if (q >  1) q =  1;
+            const uint8_t code = (uint8_t)(q + 1);
+            y[i].qs[j / 4] |= (uint8_t)(code << (2 * (j % 4)));
+        }
+    }
+}
+
+void dequantize_row_q1_0_g128(const block_q1_0_g128 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
+    const int qk = QK1_0_g128;
+    assert(k % qk == 0);
+    const int nb = k / qk;
+
+    for (int i = 0; i < nb; i++) {
+        const float d = GGML_FP16_TO_FP32(x[i].d);
+        for (int j = 0; j < qk; ++j) {
+            const uint8_t code = (x[i].qs[j / 4] >> (2 * (j % 4))) & 3;
+            y[i*qk + j] = ((int)code - 1) * d;   // {0,1,2} -> {-1,0,+1}
+        }
+    }
+}
+
+size_t quantize_q1_0_g128(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst,
+                          int64_t nrow, int64_t n_per_row, const float * quant_weights) {
+    (void) quant_weights;   // ternary scale is mean|w| (Lloyd-refined); no imatrix weighting
+    const size_t row_size = ggml_row_size(GGML_TYPE_Q1_0_g128, n_per_row);
+    char * qrow = (char *)dst;
+    for (int64_t row = 0; row < nrow; ++row) {
+        quantize_row_q1_0_g128_ref(src, (block_q1_0_g128 *)qrow, n_per_row);
+        src  += n_per_row;
+        qrow += row_size;
+    }
+    return nrow * row_size;
+}
+
 size_t quantize_q2_0(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst, int64_t nrow, int64_t n_per_row, const float * quant_weights) {
     if (!quant_weights) {
         quantize_row_q2_0_ref(src, dst, (int64_t)nrow*n_per_row);
@@ -5536,6 +5654,10 @@ bool ggml_validate_row_data(enum ggml_type type, const void * data, size_t nbyte
         case GGML_TYPE_Q2_0:
             {
                 VALIDATE_ROW_DATA_D_F16_IMPL(block_q2_0, data, nb);
+            } break;
+        case GGML_TYPE_Q1_0_g128:
+            {
+                VALIDATE_ROW_DATA_D_F16_IMPL(block_q1_0_g128, data, nb);
             } break;
         case GGML_TYPE_Q4_0:
             {

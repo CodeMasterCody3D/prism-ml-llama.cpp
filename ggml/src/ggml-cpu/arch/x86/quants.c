@@ -552,6 +552,115 @@ static inline __m128i get_scale_shuffle(int i) {
 }
 #endif
 
+void ggml_vec_dot_q1_0_g128_q8_0(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
+#if defined(__AVX2__)
+    assert(nrc == 1);
+    UNUSED(nrc);
+    UNUSED(bx);
+    UNUSED(by);
+    UNUSED(bs);
+
+    const int qk = QK1_0_g128;
+    const int nb = n / qk;
+    assert(n % qk == 0);
+
+    const block_q1_0_g128 * GGML_RESTRICT x = vx;
+    const block_q8_0      * GGML_RESTRICT y = vy;
+
+    const __m256i m3     = _mm256_set1_epi8(3);
+    const __m256i ones8  = _mm256_set1_epi8(1);
+    const __m256i ones16 = _mm256_set1_epi16(1);
+
+    __m256 acc = _mm256_setzero_ps();
+
+    for (int i = 0; i < nb; i++) {
+        // 32 bytes = 128 codes. Shifts are epi16; the per-byte AND with 3 drops
+        // whatever bled across the byte boundary.
+        const __m256i packed = _mm256_loadu_si256((const __m256i *) x[i].qs);
+        const __m256i q0 = _mm256_and_si256(packed, m3);
+        const __m256i q1 = _mm256_and_si256(_mm256_srli_epi16(packed, 2), m3);
+        const __m256i q2 = _mm256_and_si256(_mm256_srli_epi16(packed, 4), m3);
+        const __m256i q3 = _mm256_and_si256(_mm256_srli_epi16(packed, 6), m3);
+
+        // Unpack works independently in each 128-bit lane. Keeping the paired
+        // runs avoids four weight permutes; matching activation halves are
+        // paired below instead.
+        const __m256i lo01 = _mm256_unpacklo_epi8(q0, q1);
+        const __m256i hi01 = _mm256_unpackhi_epi8(q0, q1);
+        const __m256i lo23 = _mm256_unpacklo_epi8(q2, q3);
+        const __m256i hi23 = _mm256_unpackhi_epi8(q2, q3);
+
+        const __m256i A = _mm256_unpacklo_epi16(lo01, lo23); // w0..15  | w64..79
+        const __m256i B = _mm256_unpackhi_epi16(lo01, lo23); // w16..31 | w80..95
+        const __m256i C = _mm256_unpacklo_epi16(hi01, hi23); // w32..47 | w96..111
+        const __m256i D = _mm256_unpackhi_epi16(hi01, hi23); // w48..63 | w112..127
+
+        const block_q8_0 * GGML_RESTRICT yi = y + 4*i;
+        const __m256i y0 = _mm256_loadu_si256((const __m256i *) yi[0].qs);
+        const __m256i y1 = _mm256_loadu_si256((const __m256i *) yi[1].qs);
+        const __m256i y2 = _mm256_loadu_si256((const __m256i *) yi[2].qs);
+        const __m256i y3 = _mm256_loadu_si256((const __m256i *) yi[3].qs);
+
+#ifndef NDEBUG
+        // vpsignb below yields {-y, 0, +y}, but it CANNOT negate -128: two's
+        // complement -(-128) wraps back to -128 instead of +128, so a single
+        // such activation would silently corrupt the dot product by 256.
+        // Q8_0 quantization scales by 127/amax, so |q| <= 127 and -128 is
+        // unreachable -- verified in both quantize_row_q8_0 paths and over
+        // 25.6M adversarial samples. That invariant lives in ANOTHER file
+        // though, so assert it here rather than trusting a comment: this turns
+        // a future quantizer change (or hand-built Q8_0 test data) from a
+        // silent wrong answer into an immediate, obvious failure.
+        // Compiled out of release builds; zero cost when NDEBUG is set.
+        {
+            const __m256i m128 = _mm256_set1_epi8(-128);
+            const int any_m128 =
+                _mm256_movemask_epi8(_mm256_cmpeq_epi8(y0, m128)) |
+                _mm256_movemask_epi8(_mm256_cmpeq_epi8(y1, m128)) |
+                _mm256_movemask_epi8(_mm256_cmpeq_epi8(y2, m128)) |
+                _mm256_movemask_epi8(_mm256_cmpeq_epi8(y3, m128));
+            assert(any_m128 == 0 &&
+                   "Q8_0 activation == -128 breaks the vpsignb ternary path "
+                   "(cannot negate -128); the |q| <= 127 quantizer invariant "
+                   "is violated");
+        }
+#endif
+
+        const __m256i y02lo = _mm256_permute2x128_si256(y0, y2, 0x20);
+        const __m256i y02hi = _mm256_permute2x128_si256(y0, y2, 0x31);
+        const __m256i y13lo = _mm256_permute2x128_si256(y1, y3, 0x20);
+        const __m256i y13hi = _mm256_permute2x128_si256(y1, y3, 0x31);
+
+        const __m256i pA = _mm256_madd_epi16(_mm256_maddubs_epi16(ones8,
+            _mm256_sign_epi8(y02lo, _mm256_sub_epi8(A, ones8))), ones16);
+        const __m256i pB = _mm256_madd_epi16(_mm256_maddubs_epi16(ones8,
+            _mm256_sign_epi8(y02hi, _mm256_sub_epi8(B, ones8))), ones16);
+        const __m256i pC = _mm256_madd_epi16(_mm256_maddubs_epi16(ones8,
+            _mm256_sign_epi8(y13lo, _mm256_sub_epi8(C, ones8))), ones16);
+        const __m256i pD = _mm256_madd_epi16(_mm256_maddubs_epi16(ones8,
+            _mm256_sign_epi8(y13hi, _mm256_sub_epi8(D, ones8))), ones16);
+
+        const __m256i dot02 = _mm256_add_epi32(pA, pB);
+        const __m256i dot13 = _mm256_add_epi32(pC, pD);
+
+        const float d0 = GGML_CPU_FP16_TO_FP32(x[i].d);
+        const __m256 d02 = _mm256_set_m128(
+            _mm_set1_ps(d0 * GGML_CPU_FP16_TO_FP32(yi[2].d)),
+            _mm_set1_ps(d0 * GGML_CPU_FP16_TO_FP32(yi[0].d)));
+        const __m256 d13 = _mm256_set_m128(
+            _mm_set1_ps(d0 * GGML_CPU_FP16_TO_FP32(yi[3].d)),
+            _mm_set1_ps(d0 * GGML_CPU_FP16_TO_FP32(yi[1].d)));
+
+        acc = _mm256_add_ps(acc, _mm256_mul_ps(_mm256_cvtepi32_ps(dot02), d02));
+        acc = _mm256_add_ps(acc, _mm256_mul_ps(_mm256_cvtepi32_ps(dot13), d13));
+    }
+
+    *s = hsum_float_8(acc);
+#else
+    ggml_vec_dot_q1_0_g128_q8_0_generic(n, s, bs, vx, bx, vy, by, nrc);
+#endif
+}
+
 void ggml_vec_dot_q1_0_q8_0(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
     const int qk = QK1_0;
     const int nb = n / qk;

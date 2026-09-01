@@ -26,6 +26,10 @@ void quantize_row_q1_0(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, in
     quantize_row_q1_0_ref(x, y, k);
 }
 
+void quantize_row_q1_0_g128(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k) {
+    quantize_row_q1_0_g128_ref(x, y, k);
+}
+
 void quantize_row_q2_0(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k) {
     quantize_row_q2_0_ref(x, y, k);
 }
@@ -123,6 +127,49 @@ void quantize_row_q8_K_generic(const float * GGML_RESTRICT x, void * GGML_RESTRI
 }
 
 //===================================== Dot products =================================
+
+void ggml_vec_dot_q1_0_g128_q8_0_generic(int n, float * GGML_RESTRICT s, size_t bs,
+        const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
+    const int qk = QK1_0_g128;
+    const int nb = n / qk;
+
+    assert(n % qk == 0);
+    assert(nrc == 1);
+    UNUSED(nrc); UNUSED(bx); UNUSED(by); UNUSED(bs);
+
+    const block_q1_0_g128 * GGML_RESTRICT x = vx;
+    const block_q8_0      * GGML_RESTRICT y = vy;
+
+    float sumf = 0.0;
+    const int nsub = qk / QK8_0;
+
+    for (int i = 0; i < nb; i++) {
+        // One fp16 weight-group scale. The MAC loop stays integer -- xi is
+        // {-1,0,+1}, so add / skip / subtract -- with one float multiply per
+        // block applying the scale.
+        const float d0 = GGML_CPU_FP16_TO_FP32(x[i].d);
+        float sumi = 0.0f;
+
+        for (int k = 0; k < nsub; k++) {
+            const float d1 = GGML_CPU_FP16_TO_FP32(y[i*nsub + k].d);
+            int sumi_block = 0;
+
+            for (int j = 0; j < QK8_0; j++) {
+                const int idx = k * QK8_0 + j;
+                // 2 bits per weight, offset by +1: {0,1,2} -> {-1,0,+1}
+                const int xi = (int)((x[i].qs[idx / 4] >> (2 * (idx % 4))) & 3) - 1;
+                sumi_block += xi * y[i*nsub + k].qs[j];
+            }
+
+            // Only the activation scale is still floating point.
+            sumi += d1 * sumi_block;
+        }
+
+        sumf += d0 * sumi;
+    }
+
+    *s = sumf;
+}
 
 void ggml_vec_dot_q1_0_q8_0_generic(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
     const int qk = QK1_0;
