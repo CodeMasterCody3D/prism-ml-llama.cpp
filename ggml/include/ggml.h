@@ -433,7 +433,18 @@ extern "C" {
         // g128 keeps slot 41 so files written before the split stay readable.
         GGML_TYPE_Q1_0_g32  = 43,
         GGML_TYPE_Q1_0_g64  = 44,
-        GGML_TYPE_COUNT   = 45,
+        // Ternary codes identical to Q1_0_g*, but the group scale is stored as
+        // a fully-integer signed-digit stack (int8 exponent + 8 packed 2-bit
+        // digits) instead of an FP16 float -- see block_q1_sd_g128/g32 in
+        // ggml-common.h.
+        GGML_TYPE_Q1_SD_g128 = 45,
+        GGML_TYPE_Q1_SD_g32  = 46,
+        // Same ternary {-1,0,+1} codes and FP16 group scale as Q1_0_g128, but
+        // 5 trits packed per byte in base 3 (3^5=243 <= 256) instead of 2
+        // bits per trit -- a pure storage change, ~1.6 raw bits/weight
+        // instead of 2.0. See block_q1_t_g128 in ggml-common.h.
+        GGML_TYPE_Q1_T_g128 = 47,
+        GGML_TYPE_COUNT   = 48,
     };
 
     // precision
@@ -474,6 +485,9 @@ extern "C" {
         GGML_FTYPE_MOSTLY_Q1_0    = 28, // except 1d tensors
         GGML_FTYPE_MOSTLY_Q1_0_g32 = 29, // except 1d tensors
         GGML_FTYPE_MOSTLY_Q1_0_g64 = 30, // except 1d tensors
+        GGML_FTYPE_MOSTLY_Q1_SD_g128 = 31, // except 1d tensors
+        GGML_FTYPE_MOSTLY_Q1_SD_g32  = 32, // except 1d tensors
+        GGML_FTYPE_MOSTLY_Q1_T_g128  = 33, // except 1d tensors
     };
 
     // available tensor operations:

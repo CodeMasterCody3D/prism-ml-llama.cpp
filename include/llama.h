@@ -158,6 +158,9 @@ extern "C" {
         LLAMA_FTYPE_MOSTLY_Q1_0          = 41, // except 1d tensors
         LLAMA_FTYPE_MOSTLY_Q1_0_g32      = 42, // except 1d tensors
         LLAMA_FTYPE_MOSTLY_Q1_0_g64      = 43, // except 1d tensors
+        LLAMA_FTYPE_MOSTLY_Q1_SD_g128    = 44, // except 1d tensors
+        LLAMA_FTYPE_MOSTLY_Q1_SD_g32     = 45, // except 1d tensors
+        LLAMA_FTYPE_MOSTLY_Q1_T_g128     = 46, // except 1d tensors
 
         LLAMA_FTYPE_GUESSED = 1024, // not specified in the model file
     };

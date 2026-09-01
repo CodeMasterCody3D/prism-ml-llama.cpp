@@ -124,6 +124,95 @@ static float ggml_q1_0_lloyd_scale(const float * GGML_RESTRICT x, int qk, float 
     return best_a > 0.0f ? best_a : mean;
 }
 
+// ---- Q1_SD: fully-integer signed-digit scale stack (int8 exponent + 8
+// packed 2-bit signed digits) instead of an FP16 float scale. Same ternary
+// {-1,0,+1} qs codes as Q1_0_g*; only the scale representation differs.
+static float ggml_q1_sd_decode_scale(int8_t e, const uint8_t digits[2]) {
+    float scale_hat = 0.0f;
+
+    for (int i = 0; i < 8; ++i) {
+        const uint8_t code =
+            (digits[i / 4] >> (2 * (i % 4))) & 3;
+        const int digit = (int) code - 1;
+
+        scale_hat += digit * exp2f((float) e - (float) i);
+    }
+
+    return scale_hat;
+}
+
+static float ggml_q1_sd_encode_scale(float d, int8_t * e, uint8_t digits[2]) {
+    *e = d > 0.0f ? (int8_t) ceilf(log2f(d)) : 0;
+
+    digits[0] = 0;
+    digits[1] = 0;
+
+    float r = d > 0.0f ? d / exp2f((float) *e) : 0.0f;
+
+    for (int i = 0; i < 8; ++i) {
+        int digit = (int) roundf(r);
+
+        if (digit < -1) {
+            digit = -1;
+        }
+        if (digit > 1) {
+            digit = 1;
+        }
+
+        const uint8_t code = (uint8_t) (digit + 1);
+        digits[i / 4] |= (uint8_t) (code << (2 * (i % 4)));
+
+        r = (r - digit) * 2.0f;
+    }
+
+    // Round-tripped: quantization must see exactly what dequantization will
+    // apply, same discipline as the FP16 group-scale path above.
+    return ggml_q1_sd_decode_scale(*e, digits);
+}
+
+#define GGML_Q1_SD_GROUP_QUANT(SUFFIX)                                                     \
+void quantize_row_q1_sd_##SUFFIX##_ref(const float * GGML_RESTRICT x,                      \
+                                       block_q1_sd_##SUFFIX * GGML_RESTRICT y, int64_t k) { \
+    const int qk = QK1_SD_##SUFFIX;                                                        \
+    assert(k % qk == 0);                                                                    \
+    const int nb = k / qk;                                                                  \
+                                                                                            \
+    for (int i = 0; i < nb; ++i) {                                                          \
+        float sum_abs = 0.0f;                                                               \
+        for (int j = 0; j < qk; ++j) {                                                      \
+            sum_abs += fabsf(x[i*qk + j]);                                                  \
+        }                                                                                   \
+                                                                                            \
+        float d = sum_abs / qk;                                                             \
+        if (ggml_q1_0_lloyd_enabled()) {                                                    \
+            d = ggml_q1_0_lloyd_scale(x + i*qk, qk, d);                                     \
+        }                                                                                   \
+                                                                                            \
+        const float scale_hat =                                                             \
+            ggml_q1_sd_encode_scale(d, &y[i].e, y[i].digits);                               \
+                                                                                            \
+        for (int j = 0; j < qk / 4; ++j) {                                                  \
+            y[i].qs[j] = 0;                                                                 \
+        }                                                                                   \
+                                                                                            \
+        const float id = scale_hat > 0.0f ? 1.0f / scale_hat : 0.0f;                        \
+        for (int j = 0; j < qk; ++j) {                                                      \
+            int q = (int) roundf(x[i*qk + j] * id);                                         \
+            if (q < -1) {                                                                   \
+                q = -1;                                                                     \
+            }                                                                               \
+            if (q > 1) {                                                                    \
+                q = 1;                                                                      \
+            }                                                                               \
+                                                                                            \
+            const uint8_t code = (uint8_t) (q + 1);                                         \
+            y[i].qs[j / 4] |= (uint8_t) (code << (2 * (j % 4)));                            \
+        }                                                                                   \
+    }                                                                                       \
+}
+GGML_Q1_SD_GROUP_QUANT(g128)
+GGML_Q1_SD_GROUP_QUANT(g32)
+
 #define GGML_Q1_0_GROUP_QUANT(SUFFIX)                                                     \
 void quantize_row_q1_0_##SUFFIX##_ref(const float * GGML_RESTRICT x,                      \
                                       block_q1_0_##SUFFIX * GGML_RESTRICT y, int64_t k) { \
@@ -168,6 +257,54 @@ void quantize_row_q1_0_##SUFFIX##_ref(const float * GGML_RESTRICT x,            
 GGML_Q1_0_GROUP_QUANT(g32)
 GGML_Q1_0_GROUP_QUANT(g64)
 GGML_Q1_0_GROUP_QUANT(g128)
+
+// Same scale selection as quantize_row_q1_0_g128_ref (mean|w|, optionally
+// Lloyd-refined), but 5 ternary codes packed per byte in base 3 instead of 4
+// codes packed per byte in 2 bits: byte = t0 + 3*t1 + 9*t2 + 27*t3 + 81*t4.
+// 130 slots hold 128 weights -- the last 2 slots of the last byte are
+// padding, packed as digit 0 (never read back: dequantize_row_q1_t_g128 and
+// the vec_dot only ever iterate j < qk).
+void quantize_row_q1_t_g128_ref(const float * GGML_RESTRICT x, block_q1_t_g128 * GGML_RESTRICT y, int64_t k) {
+    const int qk = QK1_T_g128;
+    assert(k % qk == 0);
+    const int nb = k / qk;
+
+    for (int i = 0; i < nb; i++) {
+        float sum_abs = 0.0f;
+        for (int j = 0; j < qk; j++) {
+            sum_abs += fabsf(x[i*qk + j]);
+        }
+        float d = sum_abs / qk;
+        if (ggml_q1_0_lloyd_enabled()) {
+            d = ggml_q1_0_lloyd_scale(x + i*qk, qk, d);
+        }
+
+        /* FP16 group scale, same role as Q1_0_g128's. Stored value is    */
+        /* round-tripped so quantization sees exactly what dequantization */
+        /* will apply.                                                    */
+        y[i].d = GGML_FP32_TO_FP16(d);
+        const float dq = GGML_FP16_TO_FP32(y[i].d);
+        const float id = dq > 0.0f ? 1.0f/dq : 0.0f;
+
+        for (int b = 0; b < 26; ++b) {
+            int byte_val = 0;
+            int mul = 1;
+            for (int s = 0; s < 5; ++s) {
+                const int j = b*5 + s;
+                int digit = 0; // padding slot (j >= qk): fixed digit 0
+                if (j < qk) {
+                    int q = (int)roundf(x[i*qk + j] * id);
+                    if (q < -1) q = -1;
+                    if (q >  1) q =  1;
+                    digit = q + 1; // {-1,0,+1} -> {0,1,2}
+                }
+                byte_val += digit * mul;
+                mul *= 3;
+            }
+            y[i].qs[b] = (uint8_t)byte_val; // max 242, always fits
+        }
+    }
+}
 
 // reference implementation for deterministic creation of model files
 void quantize_row_q4_0_ref(const float * GGML_RESTRICT x, block_q4_0 * GGML_RESTRICT y, int64_t k) {
@@ -516,6 +653,51 @@ void dequantize_row_q1_0_##SUFFIX(const block_q1_0_##SUFFIX * GGML_RESTRICT x,  
 GGML_Q1_0_GROUP_DEQUANT(g32)
 GGML_Q1_0_GROUP_DEQUANT(g64)
 GGML_Q1_0_GROUP_DEQUANT(g128)
+
+// Base-3 unpack: each byte holds 5 digits via byte = t0 + 3*t1 + 9*t2 +
+// 27*t3 + 81*t4, extracted by repeated mod-3/div-3. Loop bound is qk (128),
+// so the 2 padding slots in the last byte are simply never visited.
+void dequantize_row_q1_t_g128(const block_q1_t_g128 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
+    const int qk = QK1_T_g128;
+    assert(k % qk == 0);
+    const int nb = k / qk;
+
+    for (int i = 0; i < nb; i++) {
+        const float d = GGML_FP16_TO_FP32(x[i].d);
+        for (int b = 0; b < 26; ++b) {
+            int v = x[i].qs[b];
+            for (int s = 0; s < 5; ++s) {
+                const int j = b*5 + s;
+                const int digit = v % 3;
+                v /= 3;
+                if (j < qk) {
+                    y[i*qk + j] = ((float)digit - 1.0f) * d; // {0,1,2} -> {-1,0,+1}
+                }
+            }
+        }
+    }
+}
+
+#define GGML_Q1_SD_GROUP_DEQUANT(SUFFIX)                                                    \
+void dequantize_row_q1_sd_##SUFFIX(const block_q1_sd_##SUFFIX * GGML_RESTRICT x,            \
+                                   float * GGML_RESTRICT y, int64_t k) {                     \
+    const int qk = QK1_SD_##SUFFIX;                                                         \
+    assert(k % qk == 0);                                                                    \
+    const int nb = k / qk;                                                                  \
+                                                                                            \
+    for (int i = 0; i < nb; ++i) {                                                          \
+        const float scale_hat =                                                             \
+            ggml_q1_sd_decode_scale(x[i].e, x[i].digits);                                   \
+                                                                                            \
+        for (int j = 0; j < qk; ++j) {                                                      \
+            const uint8_t code =                                                            \
+                (x[i].qs[j / 4] >> (2 * (j % 4))) & 3;                                      \
+            y[i*qk + j] = ((int) code - 1) * scale_hat;                                     \
+        }                                                                                   \
+    }                                                                                       \
+}
+GGML_Q1_SD_GROUP_DEQUANT(g128)
+GGML_Q1_SD_GROUP_DEQUANT(g32)
 
 void dequantize_row_q4_0(const block_q4_0 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
     static const int qk = QK4_0;
@@ -2190,6 +2372,41 @@ GGML_Q1_0_GROUP_QUANTIZE(g32)
 GGML_Q1_0_GROUP_QUANTIZE(g64)
 GGML_Q1_0_GROUP_QUANTIZE(g128)
 
+size_t quantize_q1_t_g128(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst,
+                           int64_t nrow, int64_t n_per_row,
+                           const float * quant_weights) {
+    (void) quant_weights;   /* ternary scale is mean|w|; no imatrix weighting */
+    const size_t row_size = ggml_row_size(GGML_TYPE_Q1_T_g128, n_per_row);
+    char * qrow = (char *)dst;
+    for (int64_t row = 0; row < nrow; ++row) {
+        quantize_row_q1_t_g128_ref(src, (block_q1_t_g128 *)qrow, n_per_row);
+        src  += n_per_row;
+        qrow += row_size;
+    }
+    return nrow * row_size;
+}
+
+#define GGML_Q1_SD_GROUP_QUANTIZE(SUFFIX)                                                   \
+size_t quantize_q1_sd_##SUFFIX(const float * GGML_RESTRICT src,                             \
+                               void * GGML_RESTRICT dst,                                    \
+                               int64_t nrow, int64_t n_per_row,                              \
+                               const float * quant_weights) {                               \
+    (void) quant_weights;                                                                   \
+    const size_t row_size =                                                                 \
+        ggml_row_size(GGML_TYPE_Q1_SD_##SUFFIX, n_per_row);                                 \
+    char * qrow = (char *) dst;                                                             \
+                                                                                            \
+    for (int64_t row = 0; row < nrow; ++row) {                                              \
+        quantize_row_q1_sd_##SUFFIX##_ref(                                                  \
+            src, (block_q1_sd_##SUFFIX *) qrow, n_per_row);                                 \
+        src  += n_per_row;                                                                  \
+        qrow += row_size;                                                                   \
+    }                                                                                       \
+                                                                                            \
+    return nrow * row_size;                                                                 \
+}
+GGML_Q1_SD_GROUP_QUANTIZE(g128)
+GGML_Q1_SD_GROUP_QUANTIZE(g32)
 
 size_t quantize_q4_0(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst, int64_t nrow, int64_t n_per_row, const float * quant_weights) {
     if (!quant_weights) {
@@ -5515,6 +5732,16 @@ bool ggml_validate_row_data(enum ggml_type type, const void * data, size_t nbyte
             {
                 VALIDATE_ROW_DATA_D_F16_IMPL(block_q1_0_g128, data, nb);
             } break;
+        case GGML_TYPE_Q1_T_g128:
+            {
+                VALIDATE_ROW_DATA_D_F16_IMPL(block_q1_t_g128, data, nb);
+            } break;
+        case GGML_TYPE_Q1_SD_g128:
+        case GGML_TYPE_Q1_SD_g32:
+            // nothing to validate: int8 exponent + packed signed-digit codes,
+            // no float field in the block (unlike the FP16-scaled Q1_0_g*
+            // family above), so there is no NaN/Inf to catch here.
+            break;
         case GGML_TYPE_Q4_0:
             {
                 VALIDATE_ROW_DATA_D_F16_IMPL(block_q4_0, data, nb);

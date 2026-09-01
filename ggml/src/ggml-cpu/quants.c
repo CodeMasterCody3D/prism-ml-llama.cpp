@@ -11,6 +11,7 @@
 #include <string.h>
 #include <assert.h>
 #include <float.h>
+#include <math.h>   // for exp2f (Q1_SD scale decode)
 #include <stdlib.h> // for qsort
 #include <stdio.h>  // for GGML_ASSERT
 
@@ -35,6 +36,22 @@ void quantize_row_q1_0_##SUFFIX(const float * GGML_RESTRICT x, void * GGML_RESTR
 GGML_Q1_0_GROUP_ROW(g32)
 GGML_Q1_0_GROUP_ROW(g64)
 GGML_Q1_0_GROUP_ROW(g128)
+
+void quantize_row_q1_t_g128(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k) {
+    quantize_row_q1_t_g128_ref(x, y, k);
+}
+
+void quantize_row_q1_sd_g128(const float * GGML_RESTRICT x,
+                             void * GGML_RESTRICT y,
+                             int64_t k) {
+    quantize_row_q1_sd_g128_ref(x, y, k);
+}
+
+void quantize_row_q1_sd_g32(const float * GGML_RESTRICT x,
+                            void * GGML_RESTRICT y,
+                            int64_t k) {
+    quantize_row_q1_sd_g32_ref(x, y, k);
+}
 
 void quantize_row_q4_0(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k) {
     quantize_row_q4_0_ref(x, y, k);
@@ -223,6 +240,131 @@ GGML_Q1_0_GROUP_VEC_DOT(g32)
 GGML_Q1_0_GROUP_VEC_DOT(g64)
 GGML_Q1_0_GROUP_VEC_DOT(g128)
 
+// Q1_SD: same ternary qs codes as Q1_0_g*, but the group scale is a
+// fully-integer signed-digit stack (int8 exponent + 8 packed 2-bit digits)
+// instead of an FP16 float. Local copy of the decode helper (also defined,
+// identically, as a static in ggml-quants.c) since that one has internal
+// linkage and this is a separate translation unit.
+static float ggml_q1_sd_decode_scale(int8_t e, const uint8_t digits[2]) {
+    float scale_hat = 0.0f;
+
+    for (int i = 0; i < 8; ++i) {
+        const uint8_t code =
+            (digits[i / 4] >> (2 * (i % 4))) & 3;
+        const int digit = (int) code - 1;
+
+        scale_hat += digit * exp2f((float) e - (float) i);
+    }
+
+    return scale_hat;
+}
+
+#define GGML_Q1_SD_GROUP_VEC_DOT(SUFFIX)                                                   \
+void ggml_vec_dot_q1_sd_##SUFFIX##_q8_0_generic(                                          \
+        int n, float * GGML_RESTRICT s, size_t bs,                                         \
+        const void * GGML_RESTRICT vx, size_t bx,                                          \
+        const void * GGML_RESTRICT vy, size_t by, int nrc) {                               \
+    const int qk = QK1_SD_##SUFFIX;                                                        \
+    const int nb = n / qk;                                                                 \
+                                                                                           \
+    assert(n % qk == 0);                                                                   \
+    assert(nrc == 1);                                                                      \
+    UNUSED(nrc);                                                                           \
+    UNUSED(bx);                                                                            \
+    UNUSED(by);                                                                            \
+    UNUSED(bs);                                                                            \
+                                                                                           \
+    const block_q1_sd_##SUFFIX * GGML_RESTRICT x = vx;                                     \
+    const block_q8_0 * GGML_RESTRICT y = vy;                                               \
+                                                                                           \
+    float sumf = 0.0f;                                                                     \
+    const int nsub = qk / QK8_0;                                                           \
+                                                                                           \
+    for (int i = 0; i < nb; ++i) {                                                         \
+        const float d0 = ggml_q1_sd_decode_scale(x[i].e, x[i].digits);                      \
+        float sumi = 0.0f;                                                                 \
+                                                                                           \
+        for (int k = 0; k < nsub; ++k) {                                                   \
+            const block_q8_0 * GGML_RESTRICT yk = &y[i*nsub + k];                          \
+            const float d1 = GGML_FP16_TO_FP32(yk->d);                                     \
+            int sumi_block = 0;                                                            \
+                                                                                           \
+            for (int j = 0; j < QK8_0; ++j) {                                              \
+                const int idx = k * QK8_0 + j;                                             \
+                const int xi =                                                             \
+                    (int) ((x[i].qs[idx / 4] >> (2 * (idx % 4))) & 3) - 1;                 \
+                sumi_block += xi * yk->qs[j];                                              \
+            }                                                                              \
+                                                                                           \
+            sumi += d1 * sumi_block;                                                       \
+        }                                                                                  \
+                                                                                           \
+        sumf += d0 * sumi;                                                                 \
+    }                                                                                      \
+                                                                                           \
+    *s = sumf;                                                                             \
+}
+
+GGML_Q1_SD_GROUP_VEC_DOT(g128)
+GGML_Q1_SD_GROUP_VEC_DOT(g32)
+
+// Q1_T_g128: same ternary values and nsub/Q8_0 sub-block structure as
+// Q1_0_g128's generic vec_dot, but base-3 unpack instead of 2-bit unpack --
+// byte = t0 + 3*t1 + 9*t2 + 27*t3 + 81*t4, so digit s is recovered by
+// dividing out the lower slots' contribution (3^s) then isolating this slot
+// with mod 3, the same place-value extraction as decimal digit-of-int.
+void ggml_vec_dot_q1_t_g128_q8_0_generic(
+        int n,
+        float * GGML_RESTRICT s,
+        size_t bs,
+        const void * GGML_RESTRICT vx,
+        size_t bx,
+        const void * GGML_RESTRICT vy,
+        size_t by,
+        int nrc) {
+    const int qk = QK1_T_g128;
+    const int nb = n / qk;
+    static const int pow3[5] = {1, 3, 9, 27, 81};
+
+    assert(n % qk == 0);
+    assert(nrc == 1);
+    UNUSED(nrc);
+    UNUSED(bx);
+    UNUSED(by);
+    UNUSED(bs);
+
+    const block_q1_t_g128 * GGML_RESTRICT x = vx;
+    const block_q8_0 * GGML_RESTRICT y = vy;
+
+    float sumf = 0.0f;
+    const int nsub = qk / QK8_0;
+
+    for (int i = 0; i < nb; ++i) {
+        const float d0 = GGML_FP16_TO_FP32(x[i].d);
+        float sumi = 0.0f;
+
+        for (int ksub = 0; ksub < nsub; ++ksub) {
+            const block_q8_0 * GGML_RESTRICT yk = &y[i*nsub + ksub];
+            const float d1 = GGML_FP16_TO_FP32(yk->d);
+            int sumi_block = 0;
+
+            for (int j = 0; j < QK8_0; ++j) {
+                const int idx = ksub * QK8_0 + j;
+                const uint8_t packed = x[i].qs[idx / 5];
+                const int digit = (packed / pow3[idx % 5]) % 3;
+                const int xi = digit - 1;
+
+                sumi_block += xi * yk->qs[j];
+            }
+
+            sumi += d1 * sumi_block;
+        }
+
+        sumf += d0 * sumi;
+    }
+
+    *s = sumf;
+}
 
 void ggml_vec_dot_q4_0_q8_0_generic(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
     const int qk = QK8_0;

@@ -224,6 +224,66 @@ GGML_Q1_0_GROUP_BLOCK(g32)
 GGML_Q1_0_GROUP_BLOCK(g64)
 GGML_Q1_0_GROUP_BLOCK(g128)
 
+// Same ternary {-1,0,+1} codes as block_q1_0_g*, but the group scale is a
+// fully-integer signed-digit stack instead of an FP16 float: an int8 power-of
+// -two exponent `e` plus 8 signed digits d_0..d_7 in {-1,0,+1} (2 bits each,
+// same code = d+1 convention as qs below), reconstructed as
+//   scale = sum_{i=0..7} d_i * 2^(e-i)
+// digits is uint8_t[2], NOT uint16_t: a plain uint16_t field forces 2-byte
+// struct alignment and pads sizeof() to 36/12 regardless of field order (the
+// struct's own alignment requirement rounds up the trailing size too) --
+// verified by compiling both layouts. uint8_t digits[2] holds the identical
+// 16 bits (byte0 = low 8 bits = d0..d3, byte1 = high 8 bits = d4..d7) with
+// zero padding, no pack pragma, matching how every block above already gets
+// its exact byte count by construction rather than by forcing alignment.
+//
+//   g32  -> 1 + 2 + 8  = 11 bytes / 32  = 2.75    bpw
+//   g128 -> 1 + 2 + 32 = 35 bytes / 128 = 2.1875  bpw
+//
+// Storage purity is the deliverable here; the reference dequant path uses
+// float math to reconstruct `scale`, same as every other block in this file.
+#define QK1_SD_g32   32
+#define QK1_SD_g128 128
+
+typedef struct {
+    int8_t  e;                    // shared power-of-two exponent
+    uint8_t digits[2];            // 8x 2-bit signed digits, d0 in low bits of digits[0]
+    uint8_t qs[QK1_SD_g128 / 4];  // 2 bits per weight, same code as q1_0_g128
+} block_q1_sd_g128;
+static_assert(sizeof(block_q1_sd_g128) == 35, "wrong q1_sd_g128 block size/padding");
+
+typedef struct {
+    int8_t  e;
+    uint8_t digits[2];
+    uint8_t qs[QK1_SD_g32 / 4];
+} block_q1_sd_g32;
+static_assert(sizeof(block_q1_sd_g32) == 11, "wrong q1_sd_g32 block size/padding");
+
+// Same ternary {-1,0,+1} codes and FP16 group scale as block_q1_0_g128, but 5
+// trits packed per byte in base 3 (3^5 = 243 <= 256) instead of 2 bits per
+// trit -- a pure storage change, not a precision change: the exact same
+// {-1,0,+1} values round-trip, just ~1.6 raw bits/weight instead of 2.0.
+//
+//   130 slots hold 128 weights; the last 2 slots are padding, always packed
+//   as digit 0 (code for ternary -1) and ignored on read.
+//   byte = t0 + 3*t1 + 9*t2 + 27*t3 + 81*t4, each ti in {0,1,2} = trit + 1.
+//   max byte value = 2*(1+3+9+27+81) = 242, so every value fits a uint8_t
+//   with headroom (243..255 never produced).
+//
+//   g128 -> 2 + 26 = 28 bytes / 128 weights = 1.750 bpw  (vs 2.125 for
+//   block_q1_0_g128 -- a -17.6% size reduction on identical weight values).
+//
+// Not expressible at smaller groups: g16 would need ceil(16/5)=4 bytes = 20
+// slots for 16 weights = exactly 2.0 bpw (all padding, no gain). g128 is the
+// smallest group in this family where the packing actually pays off, and it
+// matches QK1_0_g128 so the same row widths (896, 4864) divide evenly.
+#define QK1_T_g128 128
+typedef struct {
+    ggml_half d;          // fp16 group scale, same role as Q1_0_g128's
+    uint8_t   qs[26];     // ceil(128/5) = 26 bytes, 5 trits each = 130 slots
+} block_q1_t_g128;
+static_assert(sizeof(block_q1_t_g128) == 28, "wrong q1_t_g128 block size/padding");
+
 #define QK4_0 32
 typedef struct {
     ggml_half d;           // delta

@@ -3991,6 +3991,9 @@ class GGMLQuantizationType(IntEnum):
     Q1_0      = 42
     Q1_0_g32  = 43
     Q1_0_g64  = 44
+    Q1_SD_g128 = 45
+    Q1_SD_g32  = 46
+    Q1_T_g128  = 47
 
 
 class ExpertGatingFuncType(IntEnum):
@@ -4048,6 +4051,9 @@ class LlamaFileType(IntEnum):
     MOSTLY_Q1_0          = 41  # except 1d tensors
     MOSTLY_Q1_0_g32      = 42  # except 1d tensors
     MOSTLY_Q1_0_g64      = 43  # except 1d tensors
+    MOSTLY_Q1_SD_g128    = 44  # except 1d tensors
+    MOSTLY_Q1_SD_g32     = 45  # except 1d tensors
+    MOSTLY_Q1_T_g128     = 46  # except 1d tensors
 
     GUESSED              = 1024  # not specified in the model file
 
@@ -4164,6 +4170,13 @@ GGML_QUANT_SIZES: dict[GGMLQuantizationType, tuple[int, int]] = {
     GGMLQuantizationType.Q1_0_g128: (128, 2 + 32),
     GGMLQuantizationType.Q1_0_g64:  (64,  2 + 16),
     GGMLQuantizationType.Q1_0_g32:  (32,  2 + 8),
+    # ternary 2bit + fully-integer signed-digit scale stack (int8 exponent +
+    # 2 bytes packed digits); MUST match block_q1_sd_g128/g32 in ggml-common.h
+    GGMLQuantizationType.Q1_SD_g128: (128, 1 + 2 + 32),  # 35 bytes
+    GGMLQuantizationType.Q1_SD_g32:  (32,  1 + 2 + 8),   # 11 bytes
+    # ternary values identical to Q1_0_g128, but 5 trits/byte in base 3
+    # instead of 2 bits/trit; MUST match block_q1_t_g128 in ggml-common.h
+    GGMLQuantizationType.Q1_T_g128:  (128, 2 + 26),       # 28 bytes = 1.75 bpw
 }
 
 

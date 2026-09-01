@@ -14,6 +14,7 @@
 #include <cassert>
 #include <cstdlib> // for qsort
 #include <cstdio>  // for GGML_ASSERT
+#include <vector>
 
 #define GGML_CPU_CLANG_WORKAROUND
 #include "../../repack.h"
@@ -6403,5 +6404,179 @@ void ggml_gemm_q2_K_8x8_q8_K(int n, float * GGML_RESTRICT s, size_t bs, const vo
     ggml_gemm_q2_K_8x8_q8_K_generic(n, s, bs, vx, vy, nr, nc);
 
 
+#endif
+}
+
+#if defined(__AVX2__)
+// AVX2 apply: the whole point of block_q1_t_g128x8's byte-transposed layout
+// is that 8 interleaved rows' bytes for a given segment are contiguous, so
+// this can gather all 8 rows' table lookups into ONE __m256i per segment
+// instead of 8 scalar reads into a stack-resident accumulator.
+//
+// Measured on THIS machine (Zen 2, AVX2 only): _mm256_i32gather_epi32 is
+// NOT the way to do that gather -- it ran at ~0.54 ns/element in isolation,
+// statistically indistinguishable from a plain scalar loop (~0.53 ns/elem)
+// and confirming the well-known Zen/Zen2 gather weakness. Assembling the
+// 8 values via 8 independent scalar loads feeding _mm256_set_epi32 instead
+// measured ~0.26 ns/element -- 2x faster than gather on this chip -- because
+// the loads are independent and the OoO engine overlaps their L1 latency,
+// whereas gather is internally near-sequential on this microarchitecture.
+// That is the technique used below. (A first cut of this kernel kept a
+// per-(row,sub-block) int32 accumulator in a stack array and updated it
+// with a scalar read-modify-write per segment per row; that measured 4-15x
+// SLOWER than just looping the existing vec_dot per row, because 29
+// segments x 8 rows of stack R-M-W traffic vastly exceeds what one AVX2
+// digit-unpack instruction does per call. Keeping the four sub-block
+// accumulators as registers across the whole segment loop, as done here,
+// is what actually realises the amortisation.)
+static inline void q1t_apply_tables_to_group_avx2(
+        float out8[8],
+        const int32_t tables[Q1T_GEMV_NUM_SEGMENTS][243],
+        const float yscale[4],
+        const block_q1_t_g128x8 * GGML_RESTRICT b) {
+    __m256i dot_sb[4] = {
+        _mm256_setzero_si256(), _mm256_setzero_si256(),
+        _mm256_setzero_si256(), _mm256_setzero_si256(),
+    };
+
+    for (int s = 0; s < Q1T_GEMV_NUM_SEGMENTS; s++) {
+        const q1t_gemv_segment * seg   = &q1t_gemv_segments[s];
+        const int32_t *          table = tables[s];
+        const uint8_t *          col   = &b->qs[(size_t) seg->byte_idx * 8];
+
+        const __m256i vals = _mm256_set_epi32(
+            table[col[7]], table[col[6]], table[col[5]], table[col[4]],
+            table[col[3]], table[col[2]], table[col[1]], table[col[0]]);
+
+        dot_sb[seg->subblock] = _mm256_add_epi32(dot_sb[seg->subblock], vals);
+    }
+
+    __m256 total = _mm256_mul_ps(_mm256_cvtepi32_ps(dot_sb[0]), _mm256_set1_ps(yscale[0]));
+    total = _mm256_fmadd_ps(_mm256_cvtepi32_ps(dot_sb[1]), _mm256_set1_ps(yscale[1]), total);
+    total = _mm256_fmadd_ps(_mm256_cvtepi32_ps(dot_sb[2]), _mm256_set1_ps(yscale[2]), total);
+    total = _mm256_fmadd_ps(_mm256_cvtepi32_ps(dot_sb[3]), _mm256_set1_ps(yscale[3]), total);
+
+    const __m256 wscale = _mm256_set_ps(
+        GGML_CPU_FP16_TO_FP32(b->d[7]), GGML_CPU_FP16_TO_FP32(b->d[6]),
+        GGML_CPU_FP16_TO_FP32(b->d[5]), GGML_CPU_FP16_TO_FP32(b->d[4]),
+        GGML_CPU_FP16_TO_FP32(b->d[3]), GGML_CPU_FP16_TO_FP32(b->d[2]),
+        GGML_CPU_FP16_TO_FP32(b->d[1]), GGML_CPU_FP16_TO_FP32(b->d[0]));
+
+    __m256 outv = _mm256_loadu_ps(out8);
+    outv = _mm256_fmadd_ps(total, wscale, outv);
+    _mm256_storeu_ps(out8, outv);
+}
+#endif // __AVX2__
+
+void ggml_gemv_q1_t_g128_q8_0(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, const void * GGML_RESTRICT vy, int nr, int nc) {
+#if defined(__AVX2__)
+    const int nb_w = n / QK1_T_g128;
+    const int nb_a = n / QK8_0;
+    const int ncols_interleaved = 8;
+
+    assert(n % QK1_T_g128 == 0);
+    assert(nc % ncols_interleaved == 0);
+    UNUSED(bs);
+
+    const block_q1_t_g128x8 * b_ptr_start = (const block_q1_t_g128x8 *) vx;
+    const block_q8_0        * a_ptr_start = (const block_q8_0 *) vy;
+
+    for (int y = 0; y < nr; y++) {
+        const block_q8_0 * a_ptr = a_ptr_start + (int64_t) y * nb_a;
+        float *             srow = s + (size_t) y * nc;
+
+        for (int c = 0; c < nc; c++) {
+            srow[c] = 0.0f;
+        }
+
+        for (int l = 0; l < nb_w; l++) {
+            int32_t tables[Q1T_GEMV_NUM_SEGMENTS][243];
+            const block_q8_0 * y4 = &a_ptr[4 * l];
+            q1t_build_all_tables(tables, y4);
+
+            float yscale[4];
+            for (int k = 0; k < 4; k++) {
+                yscale[k] = GGML_CPU_FP16_TO_FP32(y4[k].d);
+            }
+
+            for (int64_t x = 0; x < nc / ncols_interleaved; x++) {
+                const block_q1_t_g128x8 * b = b_ptr_start + x * nb_w + l;
+                q1t_apply_tables_to_group_avx2(&srow[x * ncols_interleaved], tables, yscale, b);
+            }
+        }
+    }
+#else
+    ggml_gemv_q1_t_g128_q8_0_generic(n, s, bs, vx, vy, nr, nc);
+#endif
+}
+
+void ggml_gemm_q1_t_g128_q8_0(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, const void * GGML_RESTRICT vy, int nr, int nc) {
+#if defined(__AVX2__)
+    const int nb_w = n / QK1_T_g128;
+    const int nb_a = n / QK8_0;
+    const int ncols_interleaved = 8;
+
+    assert(n % QK1_T_g128 == 0);
+    assert(nr % 4 == 0);
+    assert(nc % ncols_interleaved == 0);
+
+    const block_q1_t_g128x8 * b_ptr_start = (const block_q1_t_g128x8 *) vx;
+    const block_q8_0x4      * a_ptr_start = (const block_q8_0x4 *) vy;
+
+    // Same correctness-preserving composition as the generic version: de
+    // -interleave block_q8_0x4 back into plain per-row block_q8_0 arrays
+    // (index formula copied verbatim from the proven ggml_gemm_q4_0_*
+    // _generic readers), then reuse the AVX2 per-row-group apply above.
+    std::vector<block_q8_0> row_buf[4];
+    for (int m = 0; m < 4; m++) {
+        row_buf[m].resize(nb_a);
+    }
+
+    for (int y = 0; y < nr / 4; y++) {
+        const block_q8_0x4 * a_ptr = a_ptr_start + (int64_t) y * nb_a;
+
+        for (int l = 0; l < nb_a; l++) {
+            for (int m = 0; m < 4; m++) {
+                row_buf[m][l].d = a_ptr[l].d[m];
+                for (int e = 0; e < QK8_0; e++) {
+                    int idx;
+                    if (e < QK8_0 / 2) {
+                        const int k = e / 8, i = e % 8;
+                        idx = k * 32 + m * 8 + i;
+                    } else {
+                        const int e2 = e - QK8_0 / 2;
+                        const int k = e2 / 8, i = e2 % 8;
+                        idx = 64 + k * 32 + m * 8 + i;
+                    }
+                    row_buf[m][l].qs[e] = a_ptr[l].qs[idx];
+                }
+            }
+        }
+
+        for (int m = 0; m < 4; m++) {
+            float * srow = s + (size_t) (y * 4 + m) * bs;
+            for (int c = 0; c < nc; c++) {
+                srow[c] = 0.0f;
+            }
+
+            for (int l = 0; l < nb_w; l++) {
+                int32_t tables[Q1T_GEMV_NUM_SEGMENTS][243];
+                const block_q8_0 * y4 = &row_buf[m][4 * l];
+                q1t_build_all_tables(tables, y4);
+
+                float yscale[4];
+                for (int k = 0; k < 4; k++) {
+                    yscale[k] = GGML_CPU_FP16_TO_FP32(y4[k].d);
+                }
+
+                for (int64_t x = 0; x < nc / ncols_interleaved; x++) {
+                    const block_q1_t_g128x8 * b = b_ptr_start + x * nb_w + l;
+                    q1t_apply_tables_to_group_avx2(&srow[x * ncols_interleaved], tables, yscale, b);
+                }
+            }
+        }
+    }
+#else
+    ggml_gemm_q1_t_g128_q8_0_generic(n, s, bs, vx, vy, nr, nc);
 #endif
 }

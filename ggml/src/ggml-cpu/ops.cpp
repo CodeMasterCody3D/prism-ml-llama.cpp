@@ -4833,6 +4833,9 @@ void ggml_compute_forward_get_rows(
         case GGML_TYPE_Q1_0_g32:
         case GGML_TYPE_Q1_0_g64:
         case GGML_TYPE_Q1_0_g128:
+        case GGML_TYPE_Q1_SD_g128:
+        case GGML_TYPE_Q1_SD_g32:
+        case GGML_TYPE_Q1_T_g128:
         case GGML_TYPE_Q4_0:
         case GGML_TYPE_Q4_1:
         case GGML_TYPE_Q5_0:
@@ -5562,6 +5565,9 @@ void ggml_compute_forward_clamp(
         case GGML_TYPE_Q1_0_g32:
         case GGML_TYPE_Q1_0_g64:
         case GGML_TYPE_Q1_0_g128:
+        case GGML_TYPE_Q1_SD_g128:
+        case GGML_TYPE_Q1_SD_g32:
+        case GGML_TYPE_Q1_T_g128:
         case GGML_TYPE_Q4_0:
         case GGML_TYPE_Q4_1:
         case GGML_TYPE_Q5_0:
