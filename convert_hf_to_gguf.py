@@ -1332,6 +1332,14 @@ class TextModel(ModelBase):
         if chkhsh == "d4540891389ea895b53b399da6ac824becc30f2fba0e9ddbb98f92e55ca0e97c":
             # ref: https://huggingface.co/Qwen/Qwen3-Embedding-0.6B
             res = "qwen2"
+        if chkhsh == "cb537ebe3a8c674219bdc8ece453cbb79cb937d6edf44e2711958730c4ea44ad":
+            # ref: Qwen3.8-27B (model_type qwen3_5_text), vocab 248,044.
+            # tokenizer class is Qwen2Tokenizer, i.e. the same BPE
+            # pre-tokenizer family as every other qwen2 entry here — only the
+            # vocabulary differs, and get_vocab_base_pre keys on the PRE-
+            # tokenizer, not the vocab. Verified by loading the checkpoint's
+            # own tokenizer: type(tok).__name__ == "Qwen2Tokenizer".
+            res = "qwen2"
         if chkhsh == "66b8d4e19ab16c3bfd89bce5d785fb7e0155e8648708a1f42077cb9fe002c273":
             # ref: https://huggingface.co/alvarobartt/grok-2-tokenizer
             res = "grok-2"
