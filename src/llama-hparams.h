@@ -4,6 +4,7 @@
 
 #include <array>
 #include <bitset>
+#include <cstring>
 #include <cassert>
 #include <cmath>
 
@@ -42,6 +43,36 @@ struct llama_hparams_convnext {
 };
 
 struct llama_hparams {
+    // Forge/TARDIS: weights are stored in a block-diagonal Hadamard basis.
+    // Every linear INPUT whose GGUF basename appears in this table must be
+    // rotated by H_b before its matmul. n == 0 = natural basis; every
+    // non-forge model is byte-identical in behaviour.
+    // POD on purpose: llama_hparams is static_assert'd trivially copyable.
+    static constexpr uint32_t FORGE_ROT_MAX_ENTRIES = 24;
+    static constexpr uint32_t FORGE_ROT_MAX_BASE    = 23;   // + NUL
+    struct forge_rot_entry {
+        char     base[FORGE_ROT_MAX_BASE + 1];
+        uint32_t block;
+    };
+    forge_rot_entry forge_rot_entries[FORGE_ROT_MAX_ENTRIES] = {};
+    uint32_t forge_rot_n             = 0;   // entries used
+    uint32_t forge_rot_block_default = 0;
+    uint32_t forge_rot_count         = 0;   // rotated TENSORS the file promises
+
+    bool forge_rot_active() const {
+        return forge_rot_n > 0;
+    }
+    // 0 = basename not in the table. Linear scan over <= 13 entries; called
+    // only at graph BUILD time, never inside a kernel.
+    uint32_t forge_rot_block_for_base(const char * base) const {
+        for (uint32_t i = 0; i < forge_rot_n; i++) {
+            if (strcmp(forge_rot_entries[i].base, base) == 0) {
+                return forge_rot_entries[i].block;
+            }
+        }
+        return 0;
+    }
+
     // note: use the `_impl` suffix to avoid name conflict between members and getters
     //       for example: n_embd_out() vs n_embd_out_impl
 

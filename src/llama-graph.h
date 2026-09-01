@@ -97,6 +97,8 @@ struct llm_graph_params;
 // llm_graph_input
 //
 
+class llm_graph_input_forge_rot;
+
 class llm_graph_input_i {
 public:
     llm_graph_input_i() {
@@ -183,6 +185,20 @@ public:
     const uint32_t n_attn_temp_floor_scale;
     const float    f_attn_temp_scale;
     const float    f_attn_temp_offset;
+};
+
+// Forge rotation: one [b,b] F32 Hadamard matrix per distinct block size,
+// regenerated into the input buffer on every set_input (n^2 writes -- noise).
+// Kept as a graph INPUT rather than a GGUF tensor deliberately: a [b,b] F32
+// tensor in the file would be picked up and quantized by llama-quantize
+// unless explicitly skipped -- a fresh silent-failure surface.
+class llm_graph_input_forge_rot : public llm_graph_input_i {
+public:
+    virtual ~llm_graph_input_forge_rot() = default;
+
+    void set_input(const llama_ubatch * ubatch) override;
+
+    std::map<uint32_t, ggml_tensor *> t; // block size -> [b,b] F32
 };
 
 class llm_graph_input_pos_bucket : public llm_graph_input_i {
@@ -1031,6 +1047,11 @@ struct llm_graph_context {
     const llm_graph_cb & cb_func;
 
     llm_graph_result * res;
+
+    // Forge rotation: lazily created the first time build_lora_mm meets a
+    // rotated weight; holds one [b,b] F32 Hadamard input per distinct block
+    // size (two tensors, 64 KB + 256 KB, for the whole 27B).
+    mutable llm_graph_input_forge_rot * inp_forge_rot = nullptr;
 
     ggml_context * ctx0 = nullptr;
     ggml_cgraph  * gf   = nullptr;

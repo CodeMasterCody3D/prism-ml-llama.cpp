@@ -28,6 +28,7 @@ from .constants import (
     PoolingType,
     TokenType,
     ExpertGatingFuncType,
+    Forge,
 )
 
 from .quants import quant_shape_from_byte_shape
@@ -501,6 +502,15 @@ class GGUFWriter:
             for fout in self.fout:
                 fout.close()
             self.fout = None
+
+    def add_forge_rotation_block(self, b: int) -> None:
+        self.add_uint32(Forge.ROTATION_BLOCK, b)
+
+    def add_forge_rotation_block_for(self, name: str, b: int) -> None:
+        self.add_uint32(Forge.ROTATION_BLOCK_N.format(name=name), b)
+
+    def add_forge_rotation_count(self, n: int) -> None:
+        self.add_uint32(Forge.ROTATION_COUNT, n)
 
     def add_type(self, type_name: str) -> None:
         self.add_string(Keys.General.TYPE, type_name)

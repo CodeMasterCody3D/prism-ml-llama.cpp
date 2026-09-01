@@ -469,6 +469,16 @@ class Keys:
 #
 
 
+class Forge:
+    # OneBit Forge: weights stored in a block-diagonal Hadamard basis.
+    # Arch-free on purpose -- rotation is a property of the quantizer, not of
+    # any one architecture. Scalar KVs (never arrays: the C++ metadata
+    # snapshot skips GGUF_TYPE_ARRAY, so arrays would be invisible there).
+    ROTATION_BLOCK   = "forge.rotation.block"            # legacy scalar fallback
+    ROTATION_BLOCK_N = "forge.rotation.block.{name}"     # per GGUF basename
+    ROTATION_COUNT   = "forge.rotation.count"            # rotated tensors, exact
+
+
 class GGUFType:
     MODEL   = "model"
     ADAPTER = "adapter"

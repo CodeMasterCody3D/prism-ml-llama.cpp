@@ -608,7 +608,60 @@ class _LinearAttentionVReorderBase(Qwen3NextModel):
                 # Out projection weight: reorder columns (input dimension)
                 data_torch = self._reorder_v_heads(data_torch, 1, num_k_heads, num_v_per_k, head_v_dim)
 
-        yield from super().modify_tensors(data_torch, name, bid)
+        # Forge/TARDIS: accumulate the per-GGUF-basename rotation table. The
+        # HF basename -> GGUF basename resolution happens HERE, in Python,
+        # where both names are visible -- never reverse-mapped in C++.
+        rot_map = self.hparams.get("forge_rotation_map") or {}
+        hf_base = name.split(".")[-2] if name.endswith(".weight") else None
+        rot_b = int(rot_map.get(hf_base) or 0) if hf_base else 0
+        for new_name, out in super().modify_tensors(data_torch, name, bid):
+            if rot_b > 1 and new_name.endswith(".weight"):
+                if not hasattr(self, "_forge_rot"):
+                    self._forge_rot: dict[str, int] = {}
+                    self._forge_rot_n = 0
+                gbase = new_name.rsplit(".", 2)[-2]
+                prev = self._forge_rot.setdefault(gbase, rot_b)
+                # two HF sources landing on one GGUF basename with different
+                # widths would half-apply the rotation on one of them
+                assert prev == rot_b, f"forge rotation collision on {gbase}: {prev} vs {rot_b}"
+                self._forge_rot_n += 1
+            yield new_name, out
+
+    def prepare_tensors(self):
+        super().prepare_tensors()
+        # the head is a separate stamp on a separate Python code path upstream
+        # of us (shadow_head), so it is merged here, not read from rot_map
+        rot = getattr(self, "_forge_rot", None)
+        head = int((self.hparams.get("forge_head_ternary") or {}).get("rotate") or 0)
+        if head > 1:
+            rot = rot if rot is not None else {}
+            prev = rot.setdefault("output", head)
+            assert prev == head, f"forge head rotation collision: {prev} vs {head}"
+            self._forge_rot = rot
+            self._forge_rot_n = getattr(self, "_forge_rot_n", 0) + 1
+        if not rot:
+            return
+        # measured traps, asserted where they cost nothing:
+        # tied head substituted for output.weight = 750,751 ppl on this model
+        assert self.hparams.get("tie_word_embeddings") is not True, \
+            "forge rotation with tied embeddings: measured 750,751 ppl -- refusing"
+        # the V-head column permutation must move WHOLE rotation blocks or the
+        # block-diagonal H no longer commutes with it
+        hv = int(self.hparams.get("linear_value_head_dim") or 0)
+        b_ssm = int(rot.get("ssm_out") or 0)
+        if hv and b_ssm:
+            assert hv % b_ssm == 0, f"V-head reorder vs rotation: head_v_dim {hv} % block {b_ssm} != 0"
+        for g, b in sorted(rot.items()):
+            assert b > 1 and (b & (b - 1)) == 0, f"rotation block {b} is not a power of two"
+            self.gguf_writer.add_forge_rotation_block_for(g, int(b))
+        scalar = int(self.hparams.get("forge_rotation_block") or 0)
+        if scalar > 1:
+            self.gguf_writer.add_forge_rotation_block(scalar)
+        self.gguf_writer.add_forge_rotation_count(int(self._forge_rot_n))
+        import logging
+        logging.getLogger(__name__).info(
+            "forge: rotation table %s, %d rotated tensors",
+            dict(sorted(rot.items())), self._forge_rot_n)
 
 
 class _Qwen35MRopeMixin:

@@ -1210,6 +1210,47 @@ void llama_model_base::load_hparams(llama_model_loader & ml) {
     // get general kv
     ml.get_key(LLM_KV_GENERAL_NAME, name, false);
 
+    // Forge rotation table: iterate raw KVs by prefix rather than a hardcoded
+    // basename list, so the C++ side can never disagree with what the
+    // converter actually emitted.
+    {
+        const gguf_context * fkv = ml.metadata;
+        const std::string fprefix = "forge.rotation.block.";
+        const int64_t fn = gguf_get_n_kv(fkv);
+        for (int64_t i = 0; i < fn; i++) {
+            const char * fkey = gguf_get_key(fkv, i);
+            if (strcmp(fkey, "forge.rotation.block") == 0) {
+                GGML_ASSERT(gguf_get_kv_type(fkv, i) == GGUF_TYPE_UINT32);
+                hparams.forge_rot_block_default = gguf_get_val_u32(fkv, i);
+                continue;
+            }
+            if (strcmp(fkey, "forge.rotation.count") == 0) {
+                GGML_ASSERT(gguf_get_kv_type(fkv, i) == GGUF_TYPE_UINT32);
+                hparams.forge_rot_count = gguf_get_val_u32(fkv, i);
+                continue;
+            }
+            if (strncmp(fkey, fprefix.c_str(), fprefix.size()) != 0) {
+                continue;
+            }
+            GGML_ASSERT(gguf_get_kv_type(fkv, i) == GGUF_TYPE_UINT32);
+            const uint32_t fb = gguf_get_val_u32(fkv, i);
+            GGML_ASSERT(fb > 1 && (fb & (fb - 1)) == 0 && "forge rotation block must be a power of two");
+            const char * fbase = fkey + fprefix.size();
+            GGML_ASSERT(strlen(fbase) <= llama_hparams::FORGE_ROT_MAX_BASE && "forge basename too long");
+            GGML_ASSERT(hparams.forge_rot_n < llama_hparams::FORGE_ROT_MAX_ENTRIES && "forge rotation table full");
+            GGML_ASSERT(hparams.forge_rot_block_for_base(fbase) == 0 && "duplicate forge rotation basename");
+            auto & fe = hparams.forge_rot_entries[hparams.forge_rot_n++];
+            strncpy(fe.base, fbase, llama_hparams::FORGE_ROT_MAX_BASE);
+            fe.base[llama_hparams::FORGE_ROT_MAX_BASE] = '\0';
+            fe.block = fb;
+        }
+        if (hparams.forge_rot_active()) {
+            LLAMA_LOG_INFO("%s: forge rotation: %u basenames, default %u, expect %u rotated matmuls\n",
+                    __func__, hparams.forge_rot_n,
+                    hparams.forge_rot_block_default, hparams.forge_rot_count);
+        }
+    }
+
     // everything past this point is not vocab-related
     // for CLIP models, we only need to load tensors, no hparams
     if (hparams.vocab_only || ml.get_arch() == LLM_ARCH_CLIP) {
@@ -1673,6 +1714,40 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
             strcmp(output->name, tok_embd->name) == 0 &&
             output->type == GGML_TYPE_NVFP4 &&
             (output_s || output_in_s)));
+    // Forge rotation: every tensor the table names must actually be present,
+    // and the total must match the converter's count EXACTLY. A miss here is
+    // a mixed-basis model: it runs cleanly and scores ~1e6 (measured), so it
+    // must never load. This one check forecloses partial bakes, per-basename
+    // overwrites, and the tied-head fallback (a tied head is named
+    // token_embd.weight, does not match "output", and the count comes up 1
+    // short).
+    if (hparams.forge_rot_active()) {
+        uint32_t n_rot = 0;
+        for (const auto & it : ml.weights_map) {
+            std::string base = it.first;
+            if (base.size() > 7 && base.compare(base.size() - 7, 7, ".weight") == 0) {
+                base.resize(base.size() - 7);
+            } else {
+                continue;
+            }
+            const size_t dot = base.rfind('.');
+            if (dot != std::string::npos) {
+                base = base.substr(dot + 1);
+            }
+            if (hparams.forge_rot_block_for_base(base.c_str()) > 0) {
+                n_rot++;
+            }
+        }
+        LLAMA_LOG_INFO("%s: forge rotation: %u tensors in the Hadamard basis\n", __func__, n_rot);
+        LLAMA_LOG_WARN("%s: forge: rank-64 corrections are NOT represented in this GGUF -- "
+                "expect ~1.16x worse than the published (branch-corrected) number\n", __func__);
+        if (hparams.forge_rot_count != 0 && n_rot != hparams.forge_rot_count) {
+            throw std::runtime_error(format(
+                    "forge: rotation count mismatch -- file says %u, matched %u. "
+                    "MIXED BASIS: refusing to load", hparams.forge_rot_count, n_rot));
+        }
+    }
+
     // populate tensors_by_name
     for (auto & [_, ctx_ptr] : ml.ctx_map) {
         for (auto * cur = ggml_get_first_tensor(ctx_ptr.get()); cur != NULL; cur = ggml_get_next_tensor(ctx_ptr.get(), cur)) {
