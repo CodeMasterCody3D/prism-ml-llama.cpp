@@ -1333,12 +1333,19 @@ class TextModel(ModelBase):
             # ref: https://huggingface.co/Qwen/Qwen3-Embedding-0.6B
             res = "qwen2"
         if chkhsh == "1444df51289cfa8063b96f0e62b1125440111bc79a52003ea14b6eac7016fd5f":
-            # ref: https://huggingface.co/Qwen/Qwen3.8-27B  (vocab 248,044)
-            # qwen35, NOT qwen2 — same family as the Qwen3.5-9B-Instruct entry
-            # above. The tokenizer CLASS is Qwen2Tokenizer, which is what led me
-            # to write qwen2 first; the class name is not the pre-tokenizer.
-            # Mapping to the wrong pre-tokenizer yields a GGUF that loads, runs,
-            # and scores like noise — the same failure that read union ppl
+            # ref: https://huggingface.co/openbmb/MiniCPM-V-4_6
+            # VERIFIED AGAINST UPSTREAM: ggml-org/llama.cpp master,
+            # conversion/base.py:1528 carries this exact hash -> "qwen35".
+            # It is filed under MiniCPM-V-4_6, which shares the vocabulary, so
+            # searching upstream for "Qwen3.8" finds nothing and the update
+            # script lists no Qwen3.8 entry — the coverage is real but hidden
+            # behind another model's name. (Upstream has since split the
+            # converter into a conversion/ package; this fork predates that.)
+            # Same hash reproduced locally from Qwen/Qwen3.8-27B, vocab 248,044.
+            # qwen35, NOT qwen2 — the tokenizer CLASS is Qwen2Tokenizer, which
+            # is what made me write qwen2 first. The class name is not the
+            # pre-tokenizer. A wrong pre-tokenizer yields a GGUF that loads,
+            # runs, and scores like noise — the failure that read union ppl
             # 2076.54 instead of 4.83 when --tokenizer was left to default.
             res = "qwen35"
         if chkhsh == "66b8d4e19ab16c3bfd89bce5d785fb7e0155e8648708a1f42077cb9fe002c273":
