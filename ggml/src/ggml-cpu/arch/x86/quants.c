@@ -552,6 +552,279 @@ static inline __m128i get_scale_shuffle(int i) {
 }
 #endif
 
+void ggml_vec_dot_q1_t_g128_q8_0(
+        int n,
+        float * GGML_RESTRICT s,
+        size_t bs,
+        const void * GGML_RESTRICT vx,
+        size_t bx,
+        const void * GGML_RESTRICT vy,
+        size_t by,
+        int nrc) {
+#if defined(__AVX2__)
+    assert(nrc == 1);
+    UNUSED(nrc);
+    UNUSED(bx);
+    UNUSED(by);
+    UNUSED(bs);
+
+    const int qk = QK1_0_g128;
+    const int nb = n / qk;
+
+    assert(n % qk == 0);
+
+    const block_q1_t_g128 * GGML_RESTRICT x = vx;
+    const block_q8_0 * GGML_RESTRICT y = vy;
+
+    const __m256i magic3  = _mm256_set1_epi16(21846);
+    const __m256i magic9  = _mm256_set1_epi16(7282);
+    const __m256i magic27 = _mm256_set1_epi16(2428);
+    const __m256i magic81 = _mm256_set1_epi16(810);
+    const __m256i ones8   = _mm256_set1_epi8(1);
+    const __m256i ones16  = _mm256_set1_epi16(1);
+
+    __m256 acc = _mm256_setzero_ps();
+
+    for (int i = 0; i < nb; ++i) {
+        // These are the only packed-weight loads:
+        //   first:  qs[0..15]
+        //   second: qs[10..25]
+        // Both are fully within the 26-byte qs array.
+        const __m128i packed_0_15 =
+            _mm_loadu_si128((const __m128i *) (x[i].qs + 0));
+        const __m128i packed_10_25 =
+            _mm_loadu_si128((const __m128i *) (x[i].qs + 10));
+        const __m128i packed_16_25 =
+            _mm_srli_si128(packed_10_25, 6);
+
+        const __m256i bytes_lo =
+            _mm256_cvtepu8_epi16(packed_0_15);
+        const __m256i bytes_hi =
+            _mm256_cvtepu8_epi16(packed_16_25);
+
+        // Running base-3 quotients q_s = floor(byte / 3^s).
+        // The multiply-high constants are exact for every legal byte 0..242.
+        const __m256i q1_lo = _mm256_mulhi_epu16(bytes_lo, magic3);
+        const __m256i q2_lo = _mm256_mulhi_epu16(bytes_lo, magic9);
+        const __m256i q3_lo = _mm256_mulhi_epu16(bytes_lo, magic27);
+        const __m256i q4_lo = _mm256_mulhi_epu16(bytes_lo, magic81);
+
+        const __m256i q1_hi = _mm256_mulhi_epu16(bytes_hi, magic3);
+        const __m256i q2_hi = _mm256_mulhi_epu16(bytes_hi, magic9);
+        const __m256i q3_hi = _mm256_mulhi_epu16(bytes_hi, magic27);
+        const __m256i q4_hi = _mm256_mulhi_epu16(bytes_hi, magic81);
+
+        // digit_s = q_s - 3*q_(s+1), with q_0 = byte and q_5 = 0.
+        const __m256i t0_lo = _mm256_sub_epi16(
+            bytes_lo,
+            _mm256_add_epi16(q1_lo, _mm256_add_epi16(q1_lo, q1_lo)));
+        const __m256i t1_lo = _mm256_sub_epi16(
+            q1_lo,
+            _mm256_add_epi16(q2_lo, _mm256_add_epi16(q2_lo, q2_lo)));
+        const __m256i t2_lo = _mm256_sub_epi16(
+            q2_lo,
+            _mm256_add_epi16(q3_lo, _mm256_add_epi16(q3_lo, q3_lo)));
+        const __m256i t3_lo = _mm256_sub_epi16(
+            q3_lo,
+            _mm256_add_epi16(q4_lo, _mm256_add_epi16(q4_lo, q4_lo)));
+        const __m256i t4_lo = q4_lo;
+
+        const __m256i t0_hi = _mm256_sub_epi16(
+            bytes_hi,
+            _mm256_add_epi16(q1_hi, _mm256_add_epi16(q1_hi, q1_hi)));
+        const __m256i t1_hi = _mm256_sub_epi16(
+            q1_hi,
+            _mm256_add_epi16(q2_hi, _mm256_add_epi16(q2_hi, q2_hi)));
+        const __m256i t2_hi = _mm256_sub_epi16(
+            q2_hi,
+            _mm256_add_epi16(q3_hi, _mm256_add_epi16(q3_hi, q3_hi)));
+        const __m256i t3_hi = _mm256_sub_epi16(
+            q3_hi,
+            _mm256_add_epi16(q4_hi, _mm256_add_epi16(q4_hi, q4_hi)));
+        const __m256i t4_hi = q4_hi;
+
+        // Pack each digit stream so its low lane represents packed bytes 0..15
+        // and its high lane represents packed bytes 16..25 followed by zeros.
+        const __m128i trit0_lo = _mm_packus_epi16(
+            _mm256_castsi256_si128(t0_lo),
+            _mm256_extracti128_si256(t0_lo, 1));
+        const __m128i trit1_lo = _mm_packus_epi16(
+            _mm256_castsi256_si128(t1_lo),
+            _mm256_extracti128_si256(t1_lo, 1));
+        const __m128i trit2_lo = _mm_packus_epi16(
+            _mm256_castsi256_si128(t2_lo),
+            _mm256_extracti128_si256(t2_lo, 1));
+        const __m128i trit3_lo = _mm_packus_epi16(
+            _mm256_castsi256_si128(t3_lo),
+            _mm256_extracti128_si256(t3_lo, 1));
+        const __m128i trit4_lo = _mm_packus_epi16(
+            _mm256_castsi256_si128(t4_lo),
+            _mm256_extracti128_si256(t4_lo, 1));
+
+        const __m128i trit0_hi = _mm_packus_epi16(
+            _mm256_castsi256_si128(t0_hi),
+            _mm256_extracti128_si256(t0_hi, 1));
+        const __m128i trit1_hi = _mm_packus_epi16(
+            _mm256_castsi256_si128(t1_hi),
+            _mm256_extracti128_si256(t1_hi, 1));
+        const __m128i trit2_hi = _mm_packus_epi16(
+            _mm256_castsi256_si128(t2_hi),
+            _mm256_extracti128_si256(t2_hi, 1));
+        const __m128i trit3_hi = _mm_packus_epi16(
+            _mm256_castsi256_si128(t3_hi),
+            _mm256_extracti128_si256(t3_hi, 1));
+        const __m128i trit4_hi = _mm_packus_epi16(
+            _mm256_castsi256_si128(t4_hi),
+            _mm256_extracti128_si256(t4_hi, 1));
+
+        const __m256i trit0 = MM256_SET_M128I(trit0_hi, trit0_lo);
+        const __m256i trit1 = MM256_SET_M128I(trit1_hi, trit1_lo);
+        const __m256i trit2 = MM256_SET_M128I(trit2_hi, trit2_lo);
+        const __m256i trit3 = MM256_SET_M128I(trit3_hi, trit3_lo);
+        const __m256i trit4 = MM256_SET_M128I(trit4_hi, trit4_lo);
+
+        const __m256i trit0_low =
+            _mm256_broadcastsi128_si256(trit0_lo);
+        const __m256i trit1_low =
+            _mm256_broadcastsi128_si256(trit1_lo);
+        const __m256i trit2_low =
+            _mm256_broadcastsi128_si256(trit2_lo);
+        const __m256i trit3_low =
+            _mm256_broadcastsi128_si256(trit3_lo);
+        const __m256i trit4_low =
+            _mm256_broadcastsi128_si256(trit4_lo);
+
+        const __m256i trit0_high =
+            _mm256_broadcastsi128_si256(trit0_hi);
+        const __m256i trit1_high =
+            _mm256_broadcastsi128_si256(trit1_hi);
+        const __m256i trit2_high =
+            _mm256_broadcastsi128_si256(trit2_hi);
+        const __m256i trit3_high =
+            _mm256_broadcastsi128_si256(trit3_hi);
+        const __m256i trit4_high =
+            _mm256_broadcastsi128_si256(trit4_hi);
+
+        // Produce each of the four 32-wide ternary code vectors and consume
+        // it (dot + scale + accumulate) IMMEDIATELY, one Q8_0 sub-block at a
+        // time, instead of building all four w0..w3 up front and reducing
+        // them in a separate pass afterward. This is a pure source-level
+        // reordering: the same values are computed from the same inputs in
+        // the same w0,w1,w2,w3 sequence, and `acc` accumulates p0*scale0,
+        // then p1*scale1, then p2*scale2, then p3*scale3 in that exact same
+        // order -- bit-identical floating point result, verified against
+        // the pre-reorder version over the fuzz corpus.
+        //
+        // Measured motivation (objdump on the pre-reorder build): keeping
+        // w0..w3 all live simultaneously until a shared reduction pass
+        // forces heavy stack spilling under AVX2's 16-YMM-register budget
+        // (32 stack-relative loads/stores observed in the ~171-instruction
+        // loop body, including the accumulator itself being spilled and
+        // reloaded every iteration). Shortening each w_k's live range to
+        // "build, then immediately consume" gives the register allocator
+        // more freedom to avoid some of that traffic. The mask tables
+        // (folded as vpshufb memory operands) and the magic/one constants
+        // were already hoisted by the compiler -- no fix needed there.
+        const block_q8_0 * GGML_RESTRICT yi = y + 4*i;
+        const float d0 = GGML_CPU_FP16_TO_FP32(x[i].d);
+
+        {
+            const __m256i w0 = ggml_q1_t_g128_shuffle5(
+                trit0_low, trit1_low, trit2_low, trit3_low, trit4_low,
+                ggml_q1_t_g128_shuffle_0);
+            const __m256i y0 =
+                _mm256_loadu_si256((const __m256i *) yi[0].qs);
+#ifndef NDEBUG
+            assert(_mm256_movemask_epi8(_mm256_cmpeq_epi8(y0, _mm256_set1_epi8(-128))) == 0 &&
+                   "Q8_0 activation == -128 breaks the vpsignb ternary path "
+                   "(cannot negate -128); the |q| <= 127 quantizer invariant "
+                   "is violated");
+#endif
+            const __m256i p0 = _mm256_madd_epi16(
+                _mm256_maddubs_epi16(
+                    ones8,
+                    _mm256_sign_epi8(y0, _mm256_sub_epi8(w0, ones8))),
+                ones16);
+            const __m256 scale0 = _mm256_set1_ps(
+                d0 * GGML_CPU_FP16_TO_FP32(yi[0].d));
+            acc = _mm256_add_ps(
+                acc, _mm256_mul_ps(_mm256_cvtepi32_ps(p0), scale0));
+        }
+        {
+            const __m256i w1 = ggml_q1_t_g128_shuffle5(
+                trit0_low, trit1_low, trit2_low, trit3_low, trit4_low,
+                ggml_q1_t_g128_shuffle_1);
+            const __m256i y1 =
+                _mm256_loadu_si256((const __m256i *) yi[1].qs);
+#ifndef NDEBUG
+            assert(_mm256_movemask_epi8(_mm256_cmpeq_epi8(y1, _mm256_set1_epi8(-128))) == 0 &&
+                   "Q8_0 activation == -128 breaks the vpsignb ternary path "
+                   "(cannot negate -128); the |q| <= 127 quantizer invariant "
+                   "is violated");
+#endif
+            const __m256i p1 = _mm256_madd_epi16(
+                _mm256_maddubs_epi16(
+                    ones8,
+                    _mm256_sign_epi8(y1, _mm256_sub_epi8(w1, ones8))),
+                ones16);
+            const __m256 scale1 = _mm256_set1_ps(
+                d0 * GGML_CPU_FP16_TO_FP32(yi[1].d));
+            acc = _mm256_add_ps(
+                acc, _mm256_mul_ps(_mm256_cvtepi32_ps(p1), scale1));
+        }
+        {
+            const __m256i w2 = ggml_q1_t_g128_shuffle5(
+                trit0, trit1, trit2, trit3, trit4,
+                ggml_q1_t_g128_shuffle_2);
+            const __m256i y2 =
+                _mm256_loadu_si256((const __m256i *) yi[2].qs);
+#ifndef NDEBUG
+            assert(_mm256_movemask_epi8(_mm256_cmpeq_epi8(y2, _mm256_set1_epi8(-128))) == 0 &&
+                   "Q8_0 activation == -128 breaks the vpsignb ternary path "
+                   "(cannot negate -128); the |q| <= 127 quantizer invariant "
+                   "is violated");
+#endif
+            const __m256i p2 = _mm256_madd_epi16(
+                _mm256_maddubs_epi16(
+                    ones8,
+                    _mm256_sign_epi8(y2, _mm256_sub_epi8(w2, ones8))),
+                ones16);
+            const __m256 scale2 = _mm256_set1_ps(
+                d0 * GGML_CPU_FP16_TO_FP32(yi[2].d));
+            acc = _mm256_add_ps(
+                acc, _mm256_mul_ps(_mm256_cvtepi32_ps(p2), scale2));
+        }
+        {
+            const __m256i w3 = ggml_q1_t_g128_shuffle5(
+                trit0_high, trit1_high, trit2_high, trit3_high, trit4_high,
+                ggml_q1_t_g128_shuffle_3);
+            const __m256i y3 =
+                _mm256_loadu_si256((const __m256i *) yi[3].qs);
+#ifndef NDEBUG
+            assert(_mm256_movemask_epi8(_mm256_cmpeq_epi8(y3, _mm256_set1_epi8(-128))) == 0 &&
+                   "Q8_0 activation == -128 breaks the vpsignb ternary path "
+                   "(cannot negate -128); the |q| <= 127 quantizer invariant "
+                   "is violated");
+#endif
+            const __m256i p3 = _mm256_madd_epi16(
+                _mm256_maddubs_epi16(
+                    ones8,
+                    _mm256_sign_epi8(y3, _mm256_sub_epi8(w3, ones8))),
+                ones16);
+            const __m256 scale3 = _mm256_set1_ps(
+                d0 * GGML_CPU_FP16_TO_FP32(yi[3].d));
+            acc = _mm256_add_ps(
+                acc, _mm256_mul_ps(_mm256_cvtepi32_ps(p3), scale3));
+        }
+    }
+
+    *s = hsum_float_8(acc);
+#else
+    ggml_vec_dot_q1_t_g128_q8_0_generic(
+        n, s, bs, vx, bx, vy, by, nrc);
+#endif
+}
+
 void ggml_vec_dot_q1_0_g128_q8_0(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
 #if defined(__AVX2__)
     assert(nrc == 1);

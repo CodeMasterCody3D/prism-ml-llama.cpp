@@ -35,7 +35,7 @@ void quantize_row_q1_t_g128(const float * GGML_RESTRICT x, void * GGML_RESTRICT 
 }
 
 // base-3 unpack in the MAC loop: digit = (byte / 3^(idx%5)) % 3, xi = digit - 1
-void ggml_vec_dot_q1_t_g128_q8_0(int n, float * GGML_RESTRICT s, size_t bs,
+void ggml_vec_dot_q1_t_g128_q8_0_generic(int n, float * GGML_RESTRICT s, size_t bs,
         const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
     const int qk = QK1_T_g128;
     const int nb = n / qk;

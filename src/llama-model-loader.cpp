@@ -40,6 +40,7 @@ const char * llama_ftype_name(llama_ftype ftype) {
         case LLAMA_FTYPE_MOSTLY_Q1_0:      name = LLAMA_FTYPE_PREFIX "Q1_0"; break;
         case LLAMA_FTYPE_MOSTLY_Q2_0:      name = LLAMA_FTYPE_PREFIX "Q2_0"; break;
         case LLAMA_FTYPE_MOSTLY_Q1_0_g128: name = LLAMA_FTYPE_PREFIX "Q1_0_g128 - 2.125 bpw ternary"; break;
+        case LLAMA_FTYPE_MOSTLY_Q1_T_g128: name = LLAMA_FTYPE_PREFIX "Q1_T_g128 - 1.75 bpw ternary (trit)"; break;
         case LLAMA_FTYPE_MOSTLY_Q4_0:      name = LLAMA_FTYPE_PREFIX "Q4_0"; break;
         case LLAMA_FTYPE_MOSTLY_Q4_1:      name = LLAMA_FTYPE_PREFIX "Q4_1"; break;
         case LLAMA_FTYPE_MOSTLY_Q5_0:      name = LLAMA_FTYPE_PREFIX "Q5_0"; break;
@@ -774,6 +775,7 @@ llama_model_loader::llama_model_loader(
             case GGML_TYPE_Q1_0:    ftype = LLAMA_FTYPE_MOSTLY_Q1_0;    break;
             case GGML_TYPE_Q2_0:    ftype = LLAMA_FTYPE_MOSTLY_Q2_0;    break;
             case GGML_TYPE_Q1_0_g128: ftype = LLAMA_FTYPE_MOSTLY_Q1_0_g128; break;
+            case GGML_TYPE_Q1_T_g128: ftype = LLAMA_FTYPE_MOSTLY_Q1_T_g128; break;
             default:
                 {
                     LLAMA_LOG_WARN("%s: unknown type %s\n", __func__, ggml_type_name(type_max));

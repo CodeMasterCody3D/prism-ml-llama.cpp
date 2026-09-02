@@ -403,6 +403,7 @@ static ggml_type tensor_type_fallback(quantize_state_impl & qs, const ggml_tenso
             // no reason to introduce NEW error: fall back to lossless F16
             // rather than to a lossy quant.
             case GGML_TYPE_Q1_0_g128: return_type = GGML_TYPE_F16;    break;
+            case GGML_TYPE_Q1_T_g128: return_type = GGML_TYPE_F16;    break;
             default:
                 if (qk_k <= 32) {
                     // the target is already a 32-block type, so there is no smaller block to demote to
@@ -461,7 +462,7 @@ static ggml_type llama_tensor_get_type_impl(quantize_state_impl & qs, ggml_type 
     if (category == tensor_category::OUTPUT || (qs.has_tied_embeddings && category == tensor_category::TOKEN_EMBD)) {
         if (qs.params->output_tensor_type < GGML_TYPE_COUNT) {
             new_type = qs.params->output_tensor_type;
-        } else if (ftype == LLAMA_FTYPE_MOSTLY_Q1_0_g128) {
+        } else if (ftype == LLAMA_FTYPE_MOSTLY_Q1_0_g128 || ftype == LLAMA_FTYPE_MOSTLY_Q1_T_g128) {
             // Q1_0_g128 sources are ALREADY on the ternary grid: the weights
             // were ternarized upstream and this pass only re-packs them. The
             // default rule below would promote output.weight to Q6_K, which
@@ -524,6 +525,9 @@ static ggml_type llama_tensor_get_type_impl(quantize_state_impl & qs, ggml_type 
                 // explicitly rather than left to fall through this chain, so a
                 // future branch cannot capture it by accident.
                 new_type = GGML_TYPE_Q1_0_g128;
+            }
+            else if (ftype == LLAMA_FTYPE_MOSTLY_Q1_T_g128) {
+                new_type = GGML_TYPE_Q1_T_g128;
             }
         }
     } else if (ftype == LLAMA_FTYPE_MOSTLY_IQ2_XXS || ftype == LLAMA_FTYPE_MOSTLY_IQ2_XS || ftype == LLAMA_FTYPE_MOSTLY_IQ1_S ||
@@ -877,6 +881,7 @@ ggml_type llama_ftype_get_default_type(llama_ftype ftype) {
         case LLAMA_FTYPE_MOSTLY_Q1_0: return GGML_TYPE_Q1_0;
         case LLAMA_FTYPE_MOSTLY_Q2_0: return GGML_TYPE_Q2_0;
         case LLAMA_FTYPE_MOSTLY_Q1_0_g128: return GGML_TYPE_Q1_0_g128;
+        case LLAMA_FTYPE_MOSTLY_Q1_T_g128: return GGML_TYPE_Q1_T_g128;
 
         case LLAMA_FTYPE_MOSTLY_MXFP4_MOE: return GGML_TYPE_MXFP4;
 

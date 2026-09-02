@@ -478,6 +478,7 @@ extern "C" {
         GGML_FTYPE_MOSTLY_Q1_0    = 27, // except 1d tensors
         GGML_FTYPE_MOSTLY_Q2_0    = 28, // except 1d tensors
         GGML_FTYPE_MOSTLY_Q1_0_g128 = 29, // except 1d tensors
+        GGML_FTYPE_MOSTLY_Q1_T_g128 = 30, // except 1d tensors
     };
 
     // available tensor operations:
