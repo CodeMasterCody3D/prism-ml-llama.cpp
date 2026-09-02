@@ -290,6 +290,13 @@ bool ggml_cuda_should_use_mmvq(enum ggml_type type, int cc, int64_t ne11) {
     if (!ggml_is_quantized(type)) {
         return false;
     }
+    // Q1_0_g128 has no MMVQ vec_dot kernel (its group-128 single-scale layout is
+    // not covered by the fused tile loaders). Force the dequant + cuBLAS GEMM
+    // path; without this the deny-style default below would route it to mmvq and
+    // get_vec_dot_q_cuda would return nullptr -> crash.
+    if (type == GGML_TYPE_Q1_0_g128) {
+        return false;
+    }
     // k-quants cost more to decode and mvq redoes that per column, so MMQ wins sooner.
     // Only list quant-types MMQ supports, others would fall back to cuBLAS.
     if (GGML_CUDA_CC_IS_NVIDIA(cc) && cc == GGML_CUDA_CC_ADA_LOVELACE) {
