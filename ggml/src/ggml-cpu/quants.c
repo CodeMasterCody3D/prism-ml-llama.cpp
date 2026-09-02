@@ -34,6 +34,41 @@ void quantize_row_q1_t_g128(const float * GGML_RESTRICT x, void * GGML_RESTRICT 
     quantize_row_q1_t_g128_ref(x, y, k);
 }
 
+void quantize_row_q1_r_g128(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k) {
+    quantize_row_q1_r_g128_ref(x, y, k);
+}
+
+// K is stored rotated; un-rotate to real K (via to_float) then dot with the
+// dequantized Q8. Correct on both flash (to_float cast) and non-flash paths.
+void ggml_vec_dot_q1_r_g128_q8_0(int n, float * GGML_RESTRICT s, size_t bs,
+        const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
+    const int qk = QK1_T_g128;
+    const int nb = n / qk;
+    assert(n % qk == 0);
+    assert(nrc == 1);
+    UNUSED(nrc); UNUSED(bx); UNUSED(by); UNUSED(bs);
+
+    const block_q1_t_g128 * GGML_RESTRICT x = vx;
+    const block_q8_0      * GGML_RESTRICT y = vy;
+    const int nsub = qk / QK8_0;
+    float sumf = 0.0f;
+
+    for (int i = 0; i < nb; ++i) {
+        float kf[128];
+        dequantize_row_q1_r_g128(&x[i], kf, 128);           // unpack + un-rotate -> real K
+        for (int ksub = 0; ksub < nsub; ++ksub) {
+            const block_q8_0 * GGML_RESTRICT yk = &y[i*nsub + ksub];
+            const float d1 = GGML_CPU_FP16_TO_FP32(yk->d);
+            float acc = 0.0f;
+            for (int j = 0; j < QK8_0; ++j) {
+                acc += kf[ksub*QK8_0 + j] * (float) yk->qs[j];
+            }
+            sumf += d1 * acc;
+        }
+    }
+    *s = sumf;
+}
+
 // base-3 unpack in the MAC loop: digit = (byte / 3^(idx%5)) % 3, xi = digit - 1
 void ggml_vec_dot_q1_t_g128_q8_0_generic(int n, float * GGML_RESTRICT s, size_t bs,
         const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {

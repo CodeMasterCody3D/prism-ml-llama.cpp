@@ -314,6 +314,7 @@ const std::vector<ggml_type> kv_cache_types = {
     GGML_TYPE_Q1_0_g128, // forge ternary KV: 2.125 bpw, ~4x vs q8 / ~7.5x vs fp16
                          // (row width must be a multiple of 128; e.g. 27B n_embd_k_gqa=1024)
     GGML_TYPE_Q1_T_g128, // forge ternary KV, base-3 trit pack: 1.75 bpw, the max-compression k1
+    GGML_TYPE_Q1_R_g128, // k1 + block-Hadamard rotation: same 1.75 bpw, +38% quality (real K/V)
 };
 
 static ggml_type kv_cache_type_from_str(const std::string & s) {

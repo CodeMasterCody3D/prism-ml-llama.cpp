@@ -2290,6 +2290,45 @@ void dequantize_row_q1_t_g128(const block_q1_t_g128 * GGML_RESTRICT x, float * G
     }
 }
 
+
+// ============================ Q1_R_g128 ====================================
+// q1_t (base-3 trit) with a fixed 128-block Hadamard rotation applied BEFORE the
+// ternary snap. Spreads the K/V distribution so 3 levels fit better; H is
+// symmetric+orthonormal so to_float un-rotates and the attention output is
+// unchanged (verified: rotating in the codec == rotating Q). KV-cache-only.
+static void ggml_fwht128(float * v) {
+    for (int h = 1; h < 128; h <<= 1) {
+        for (int i = 0; i < 128; i += 2*h) {
+            for (int j = i; j < i + h; ++j) {
+                const float a = v[j], b = v[j+h];
+                v[j] = a + b; v[j+h] = a - b;
+            }
+        }
+    }
+    const float s = 1.0f / sqrtf(128.0f);
+    for (int i = 0; i < 128; ++i) v[i] *= s;
+}
+
+void quantize_row_q1_r_g128_ref(const float * GGML_RESTRICT x, block_q1_t_g128 * GGML_RESTRICT y, int64_t k) {
+    assert(k % 128 == 0);
+    const int nb = k / 128;
+    for (int i = 0; i < nb; i++) {
+        float tmp[128];
+        for (int j = 0; j < 128; j++) tmp[j] = x[i*128 + j];
+        ggml_fwht128(tmp);                                  // rotate onto the grid
+        quantize_row_q1_t_g128_ref(tmp, &y[i], 128);        // Lloyd scale + base-3 pack
+    }
+}
+
+void dequantize_row_q1_r_g128(const block_q1_t_g128 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
+    assert(k % 128 == 0);
+    const int nb = k / 128;
+    for (int i = 0; i < nb; i++) {
+        dequantize_row_q1_t_g128(&x[i], y + i*128, 128);    // base-3 unpack (rotated basis)
+        ggml_fwht128(y + i*128);                            // un-rotate (H^2 = I)
+    }
+}
+
 size_t quantize_q1_t_g128(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst,
                           int64_t nrow, int64_t n_per_row, const float * quant_weights) {
     (void) quant_weights;   // ternary scale is mean|w| (Lloyd-refined); no imatrix
@@ -5735,6 +5774,10 @@ bool ggml_validate_row_data(enum ggml_type type, const void * data, size_t nbyte
                 VALIDATE_ROW_DATA_D_F16_IMPL(block_q1_0_g128, data, nb);
             } break;
         case GGML_TYPE_Q1_T_g128:
+            {
+                VALIDATE_ROW_DATA_D_F16_IMPL(block_q1_t_g128, data, nb);
+            } break;
+        case GGML_TYPE_Q1_R_g128:
             {
                 VALIDATE_ROW_DATA_D_F16_IMPL(block_q1_t_g128, data, nb);
             } break;

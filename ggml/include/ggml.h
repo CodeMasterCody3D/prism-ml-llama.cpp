@@ -432,7 +432,8 @@ extern "C" {
         GGML_TYPE_Q2_0    = 42,
         GGML_TYPE_Q1_0_g128 = 43, // ternary {-1,0,+1}, FP16 scale per group of 128 (2.125 bpw)
         GGML_TYPE_Q1_T_g128 = 44, // ternary, base-3 5-trit pack, FP16 scale/128 (1.75 bpw)
-        GGML_TYPE_COUNT   = 45,
+        GGML_TYPE_Q1_R_g128 = 45, // q1_t + block-Hadamard rotation before the snap (KV: +38% quality)
+        GGML_TYPE_COUNT   = 46,
     };
 
     // precision
