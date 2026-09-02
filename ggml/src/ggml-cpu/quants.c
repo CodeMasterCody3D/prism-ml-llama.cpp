@@ -30,6 +30,45 @@ void quantize_row_q1_0_g128(const float * GGML_RESTRICT x, void * GGML_RESTRICT 
     quantize_row_q1_0_g128_ref(x, y, k);
 }
 
+void quantize_row_q1_t_g128(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k) {
+    quantize_row_q1_t_g128_ref(x, y, k);
+}
+
+// base-3 unpack in the MAC loop: digit = (byte / 3^(idx%5)) % 3, xi = digit - 1
+void ggml_vec_dot_q1_t_g128_q8_0(int n, float * GGML_RESTRICT s, size_t bs,
+        const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
+    const int qk = QK1_T_g128;
+    const int nb = n / qk;
+    static const int pow3[5] = {1, 3, 9, 27, 81};
+    assert(n % qk == 0);
+    assert(nrc == 1);
+    UNUSED(nrc); UNUSED(bx); UNUSED(by); UNUSED(bs);
+
+    const block_q1_t_g128 * GGML_RESTRICT x = vx;
+    const block_q8_0      * GGML_RESTRICT y = vy;
+    float sumf = 0.0f;
+    const int nsub = qk / QK8_0;
+
+    for (int i = 0; i < nb; ++i) {
+        const float d0 = GGML_CPU_FP16_TO_FP32(x[i].d);
+        float sumi = 0.0f;
+        for (int ksub = 0; ksub < nsub; ++ksub) {
+            const block_q8_0 * GGML_RESTRICT yk = &y[i*nsub + ksub];
+            const float d1 = GGML_CPU_FP16_TO_FP32(yk->d);
+            int sumi_block = 0;
+            for (int j = 0; j < QK8_0; ++j) {
+                const int idx = ksub * QK8_0 + j;
+                const uint8_t packed = x[i].qs[idx / 5];
+                const int xi = ((packed / pow3[idx % 5]) % 3) - 1;
+                sumi_block += xi * yk->qs[j];
+            }
+            sumi += d1 * sumi_block;
+        }
+        sumf += d0 * sumi;
+    }
+    *s = sumf;
+}
+
 void quantize_row_q2_0(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k) {
     quantize_row_q2_0_ref(x, y, k);
 }

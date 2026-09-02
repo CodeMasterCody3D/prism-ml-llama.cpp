@@ -2228,6 +2228,68 @@ size_t quantize_q1_0_g128(const float * GGML_RESTRICT src, void * GGML_RESTRICT 
     return nrow * row_size;
 }
 
+
+// ============================ Q1_T_g128 ====================================
+// base-3 5-trit pack of the same ternary grid; KV-cache-only, 1.75 bpw.
+void quantize_row_q1_t_g128_ref(const float * GGML_RESTRICT x, block_q1_t_g128 * GGML_RESTRICT y, int64_t k) {
+    const int qk = QK1_T_g128;
+    assert(k % qk == 0);
+    const int nb = k / qk;
+
+    for (int i = 0; i < nb; i++) {
+        float sum_abs = 0.0f;
+        for (int j = 0; j < qk; j++) {
+            sum_abs += fabsf(x[i*qk + j]);
+        }
+        float d = sum_abs / qk;
+        if (ggml_q1_0_g128_lloyd_enabled()) {
+            d = ggml_q1_0_g128_lloyd_scale(x + i*qk, qk, d);
+        }
+        y[i].d = GGML_FP32_TO_FP16(d);
+        const float dq = GGML_FP16_TO_FP32(y[i].d);
+        const float id = dq > 0.0f ? 1.0f/dq : 0.0f;
+
+        for (int b = 0; b < 26; ++b) {
+            int byte_val = 0;
+            int mul = 1;
+            for (int s = 0; s < 5; ++s) {
+                const int j = b*5 + s;
+                int digit = 0;                       // padding slot -> digit 0
+                if (j < qk) {
+                    int q = (int)roundf(x[i*qk + j] * id);
+                    if (q < -1) q = -1;
+                    if (q >  1) q =  1;
+                    digit = q + 1;                   // {-1,0,+1} -> {0,1,2}
+                }
+                byte_val += digit * mul;
+                mul *= 3;
+            }
+            y[i].qs[b] = (uint8_t)byte_val;          // max 242, fits in a byte
+        }
+    }
+}
+
+void dequantize_row_q1_t_g128(const block_q1_t_g128 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
+    const int qk = QK1_T_g128;
+    assert(k % qk == 0);
+    const int nb = k / qk;
+
+    for (int i = 0; i < nb; i++) {
+        const float d = GGML_FP16_TO_FP32(x[i].d);
+        for (int b = 0; b < 26; ++b) {
+            int v = x[i].qs[b];
+            for (int s = 0; s < 5; ++s) {
+                const int j = b*5 + s;
+                const int digit = v % 3;
+                v /= 3;
+                if (j < qk) {
+                    y[i*qk + j] = ((float)digit - 1.0f) * d;   // {0,1,2} -> {-1,0,+1}
+                }
+            }
+        }
+    }
+}
+
 size_t quantize_q2_0(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst, int64_t nrow, int64_t n_per_row, const float * quant_weights) {
     if (!quant_weights) {
         quantize_row_q2_0_ref(src, dst, (int64_t)nrow*n_per_row);
@@ -5658,6 +5720,10 @@ bool ggml_validate_row_data(enum ggml_type type, const void * data, size_t nbyte
         case GGML_TYPE_Q1_0_g128:
             {
                 VALIDATE_ROW_DATA_D_F16_IMPL(block_q1_0_g128, data, nb);
+            } break;
+        case GGML_TYPE_Q1_T_g128:
+            {
+                VALIDATE_ROW_DATA_D_F16_IMPL(block_q1_t_g128, data, nb);
             } break;
         case GGML_TYPE_Q4_0:
             {

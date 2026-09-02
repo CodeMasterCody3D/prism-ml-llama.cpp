@@ -208,6 +208,17 @@ typedef struct {
 static_assert(sizeof(block_q1_0_g128) == sizeof(ggml_half) + QK1_0_g128 / 4,
               "wrong q1_0_g128 block size/padding");
 
+// Same ternary {-1,0,+1} codes and FP16 group scale as block_q1_0_g128, but 5
+// trits base-3 packed per byte instead of 4 codes at 2 bits: 26 bytes hold 130
+// slots (128 real + 2 padding) -> 28 bytes / 128 = 1.75 bpw (vs 2.125). Used as
+// a KV cache type for maximum context-length compression.
+#define QK1_T_g128 128
+typedef struct {
+    ggml_half d;          // fp16 group scale, same role as Q1_0_g128's
+    uint8_t   qs[26];     // ceil(128/5) = 26 bytes, 5 trits each = 130 slots
+} block_q1_t_g128;
+static_assert(sizeof(block_q1_t_g128) == 28, "wrong q1_t_g128 block size/padding");
+
 #define QK4_0 32
 typedef struct {
     ggml_half d;           // delta
