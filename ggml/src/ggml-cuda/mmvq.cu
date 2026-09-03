@@ -294,7 +294,7 @@ bool ggml_cuda_should_use_mmvq(enum ggml_type type, int cc, int64_t ne11) {
     // not covered by the fused tile loaders). Force the dequant + cuBLAS GEMM
     // path; without this the deny-style default below would route it to mmvq and
     // get_vec_dot_q_cuda would return nullptr -> crash.
-    if (type == GGML_TYPE_Q1_0_g128) {
+    if (type == GGML_TYPE_Q1_0_g128 || type == GGML_TYPE_Q1_T_g128) {
         return false;
     }
     // k-quants cost more to decode and mvq redoes that per column, so MMQ wins sooner.

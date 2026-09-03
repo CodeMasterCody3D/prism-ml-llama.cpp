@@ -64,6 +64,27 @@ static __device__ __forceinline__ void dequantize_q1_0_g128(const void * vx, con
     v.y = (c1 - 1) * d;
 }
 
+static __device__ __forceinline__ void dequantize_q1_t_g128(const void * vx, const int64_t ib, const int iqs, float2 & v){
+    // Ternary base-3 5-trit pack, ONE fp16 scale per group of 128
+    // (block_q1_t_g128, 28 bytes).  Trit s of byte b is (qs[b] / 3^s) % 3;
+    // digit t in {0,1,2} maps to w = d * (t - 1).  QR == 1: adjacent pair.
+    const block_q1_t_g128 * x = (const block_q1_t_g128 *) vx;
+
+    const float d = x[ib].d;
+
+    #pragma unroll
+    for (int k = 0; k < 2; ++k) {
+        const int j = iqs + k;
+        const int s = j % 5;
+        int t = x[ib].qs[j / 5];
+        for (int r = 0; r < s; ++r) {
+            t /= 3;
+        }
+        t %= 3;
+        ((float *) &v)[k] = (float) (t - 1) * d;
+    }
+}
+
 static __device__ __forceinline__ void dequantize_q4_0(const void * vx, const int64_t ib, const int iqs, float2 & v){
     const block_q4_0 * x = (const block_q4_0 *) vx;
 
