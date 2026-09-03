@@ -199,7 +199,12 @@ static __global__ void flash_attn_ext_vec(
                 const int i = i0 + (nthreads_KQ == WARP_SIZE ? threadIdx.x : threadIdx.x % nthreads_KQ);
 
                 Q_i32[j][i0/nthreads_KQ] = tmp_q_i32[i];
-                Q_ds[j][i0/nthreads_KQ]  = tmp_q_ds[i/QI8_1];
+                {   // 32-bit loads: a float* cannot be proven 8-aligned, so nvcc
+                    // cannot fuse this into a 64-bit shared load (misaligned on Blackwell
+                    // for the ncols=1 instance -- compute-sanitizer, fattn-vec.cuh:202).
+                    const float * tmp_q_ds_f = (const float *) tmp_q_ds;
+                    Q_ds[j][i0/nthreads_KQ] = make_float2(tmp_q_ds_f[2*(i/QI8_1) + 0], tmp_q_ds_f[2*(i/QI8_1) + 1]);
+                }
             }
         }
 
