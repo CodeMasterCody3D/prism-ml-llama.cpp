@@ -1,3 +1,5 @@
+> **This is the TAARDIS fork** (full-ternary integer models, ternary KV cache on CPU + CUDA, block-Hadamard rotation). Lineage, features and build notes: [TAARDIS.md](TAARDIS.md). Upstream README follows.
+
 # llama.cpp
 
 ![llama](https://raw.githubusercontent.com/ggml-org/llama.brand/refs/heads/master/cover/llama-cpp/cover-llama-cpp-dark.svg)
