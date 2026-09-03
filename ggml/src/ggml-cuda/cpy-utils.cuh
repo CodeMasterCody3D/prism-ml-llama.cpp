@@ -191,17 +191,51 @@ static __device__ void cpy_blck_f32_q4_0(const char * cxi, char * cdsti) {
     quantize_f32_q4_0_block((const float *)cxi, (block_q4_0 *)cdsti);
 }
 
-static __device__ void quantize_f32_q1_t_g128_block(const float * __restrict__ x, block_q1_t_g128 * __restrict__ y) {
-    // Mirrors quantize_row_q1_t_g128_ref: d = mean|x|, digits {0,1,2} packed
-    // base-3 five per byte, little-first, slots 128..129 padded 0.
-    // NOTE: no Lloyd refine here -- parity with the CPU DEFAULT path; the
-    // env-gated Lloyd option is CPU-only and must stay off for CUDA KV runs.
+// Verbatim port of ggml_q1_0_g128_lloyd_scale (ggml-quants.c): 4 seeds x <=8
+// threshold/mean iterations, keep the best residual-reduction objective.
+static __device__ float q1_t_g128_lloyd_scale_dev(const float * __restrict__ x, const int qk, const float mean) {
+    if (mean <= 0.0f) {
+        return 0.0f;
+    }
+    const float inits[4] = {0.5f, 0.7f, 0.9f, 1.1f};
+    float best_a   = mean;
+    float best_obj = -1.0f;
+    for (int ci = 0; ci < 4; ci++) {
+        float th = inits[ci] * mean;
+        float s1 = 0.0f; int sw = 0;
+        for (int j = 0; j < qk; j++) {
+            const float w = fabsf(x[j]);
+            if (w > th) { s1 += w; sw++; }
+        }
+        float a = sw > 0 ? s1/sw : 0.0f;
+        for (int it = 0; it < 8 && a > 0.0f; it++) {
+            th = 0.5f * a;
+            s1 = 0.0f; sw = 0;
+            for (int j = 0; j < qk; j++) {
+                const float w = fabsf(x[j]);
+                if (w > th) { s1 += w; sw++; }
+            }
+            const float na = sw > 0 ? s1/sw : 0.0f;
+            if (fabsf(na - a) <= 1e-6f * fmaxf(na, a)) { a = na; break; }
+            a = na;
+        }
+        const float obj = sw > 0 ? s1*s1/(float)sw : 0.0f;
+        if (obj > best_obj) { best_obj = obj; best_a = a; }
+    }
+    return best_a > 0.0f ? best_a : mean;
+}
+
+template <bool lloyd>
+static __device__ void quantize_f32_q1_t_g128_block_t(const float * __restrict__ x, block_q1_t_g128 * __restrict__ y) {
     float sum_abs = 0.0f;
 #pragma unroll
     for (int j = 0; j < QK1_T_g128; ++j) {
         sum_abs += fabsf(x[j]);
     }
-    const float d = sum_abs / QK1_T_g128;
+    float d = sum_abs / QK1_T_g128;
+    if (lloyd) {
+        d = q1_t_g128_lloyd_scale_dev(x, QK1_T_g128, d);
+    }
     y->d = __float2half(d);
     const float dq = __half2float(y->d);
     const float id = dq > 0.0f ? 1.0f/dq : 0.0f;
@@ -224,6 +258,27 @@ static __device__ void quantize_f32_q1_t_g128_block(const float * __restrict__ x
         }
         y->qs[b] = (uint8_t) byte_val;
     }
+}
+
+// CPU parity: quantize_row_q1_t_g128_ref applies Lloyd unless Q1_0_G128_LLOYD=0.
+static inline bool ggml_cuda_q1_t_g128_lloyd_enabled(void) {
+    static int cached = -1;
+    if (cached < 0) {
+        const char * v = getenv("Q1_0_G128_LLOYD");
+        cached = (v && v[0] == '0') ? 0 : 1;
+    }
+    return cached != 0;
+}
+static __device__ void quantize_f32_q1_t_g128_block_lloyd(const float * __restrict__ x, block_q1_t_g128 * __restrict__ y) {
+    quantize_f32_q1_t_g128_block_t<true>(x, y);
+}
+
+static __device__ void quantize_f32_q1_t_g128_block(const float * __restrict__ x, block_q1_t_g128 * __restrict__ y) {
+    quantize_f32_q1_t_g128_block_t<false>(x, y);
+}
+
+static __device__ void cpy_blck_f32_q1_t_g128_lloyd(const char * cxi, char * cdsti) {
+    quantize_f32_q1_t_g128_block_lloyd((const float *)cxi, (block_q1_t_g128 *)cdsti);
 }
 
 static __device__ void cpy_blck_f32_q1_t_g128(const char * cxi, char * cdsti) {

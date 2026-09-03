@@ -10080,6 +10080,10 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
                 if (hs % 128 == 0) { // q1_t block = 128: only whole-block rows
                     test_cases.emplace_back(new test_flash_attn_ext(hs, hs, 8, {4, 1}, kv, nb, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_Q1_T_g128, GGML_TYPE_Q1_T_g128));
                 }
+                if (hs % 128 == 0 && nb == 32) { // nb1_decode: the single-token decode shape
+                    test_cases.emplace_back(new test_flash_attn_ext(hs, hs, 8, {4, 1}, kv, 1, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_Q1_T_g128, GGML_TYPE_Q1_T_g128));
+                    test_cases.emplace_back(new test_flash_attn_ext(hs, hs, 8, {4, 1}, kv, 2, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_Q1_T_g128, GGML_TYPE_Q1_T_g128));
+                }
             }
         }
     }

@@ -304,7 +304,9 @@ static void ggml_cpy_f32_q1_t_g128_cuda(
     GGML_ASSERT(ne % QK1_T_g128 == 0);
     const int64_t num_blocks = (ne/QK1_T_g128 + CUDA_CPY_BLOCK_SIZE - 1) / CUDA_CPY_BLOCK_SIZE;
     GGML_ASSERT(num_blocks <= INT_MAX);
-    cpy_f32_q<cpy_blck_f32_q1_t_g128, QK1_T_g128><<<num_blocks, CUDA_CPY_BLOCK_SIZE, 0, stream>>>
+    (ggml_cuda_q1_t_g128_lloyd_enabled()
+        ? cpy_f32_q<cpy_blck_f32_q1_t_g128_lloyd, QK1_T_g128>
+        : cpy_f32_q<cpy_blck_f32_q1_t_g128,       QK1_T_g128>)<<<num_blocks, CUDA_CPY_BLOCK_SIZE, 0, stream>>>
         (cx, cdst, ne, ne00, ne01, ne02, nb00, nb01, nb02, nb03, ne10, ne11, ne12, nb10, nb11, nb12, nb13);
 }
 
