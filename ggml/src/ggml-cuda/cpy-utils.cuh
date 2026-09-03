@@ -191,6 +191,45 @@ static __device__ void cpy_blck_f32_q4_0(const char * cxi, char * cdsti) {
     quantize_f32_q4_0_block((const float *)cxi, (block_q4_0 *)cdsti);
 }
 
+static __device__ void quantize_f32_q1_t_g128_block(const float * __restrict__ x, block_q1_t_g128 * __restrict__ y) {
+    // Mirrors quantize_row_q1_t_g128_ref: d = mean|x|, digits {0,1,2} packed
+    // base-3 five per byte, little-first, slots 128..129 padded 0.
+    // NOTE: no Lloyd refine here -- parity with the CPU DEFAULT path; the
+    // env-gated Lloyd option is CPU-only and must stay off for CUDA KV runs.
+    float sum_abs = 0.0f;
+#pragma unroll
+    for (int j = 0; j < QK1_T_g128; ++j) {
+        sum_abs += fabsf(x[j]);
+    }
+    const float d = sum_abs / QK1_T_g128;
+    y->d = __float2half(d);
+    const float dq = __half2float(y->d);
+    const float id = dq > 0.0f ? 1.0f/dq : 0.0f;
+
+#pragma unroll
+    for (int b = 0; b < 26; ++b) {
+        int byte_val = 0;
+        int mul      = 1;
+#pragma unroll
+        for (int s = 0; s < 5; ++s) {
+            const int j = b*5 + s;
+            int digit = 0;
+            if (j < QK1_T_g128) {
+                int q = (int) roundf(x[j] * id);
+                q = q < -1 ? -1 : (q > 1 ? 1 : q);
+                digit = q + 1;
+            }
+            byte_val += digit * mul;
+            mul      *= 3;
+        }
+        y->qs[b] = (uint8_t) byte_val;
+    }
+}
+
+static __device__ void cpy_blck_f32_q1_t_g128(const char * cxi, char * cdsti) {
+    quantize_f32_q1_t_g128_block((const float *)cxi, (block_q1_t_g128 *)cdsti);
+}
+
 static __device__ void cpy_blck_f32_q4_1(const char * cxi, char * cdsti) {
     quantize_f32_q4_1_block((const float *)cxi, (block_q4_1 *)cdsti);
 }
