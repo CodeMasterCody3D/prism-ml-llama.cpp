@@ -246,25 +246,36 @@ template <int vdr> static __device__ __forceinline__ float vec_dot_q5_1_q8_1_imp
 // elements [32*iqs, 32*iqs+32) of block kbx against q8_1 sub-block bq8_1[iqs].
 // w = d * (code - 1) with code in {0,1,2}; lanes hold (code-1) in {-1,0,+1}
 // via __vsub4 (per-byte subtract, no inter-lane borrow), then 8x dp4a.
-#define VDR_Q1_0_G128_Q8_1_MMVQ 1
+#ifndef TAARDIS_Q1_0_VDR
+#define TAARDIS_Q1_0_VDR 1
+#endif
+#define VDR_Q1_0_G128_Q8_1_MMVQ TAARDIS_Q1_0_VDR
 #define VDR_Q1_T_G128_Q8_1_MMVQ 4   // == qi: one thread per 128-block, no per-lane switch (warp-uniform)
 
-static __device__ __forceinline__ float vec_dot_q1_0_g128_q8_1(
-    const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & kbx, const int & iqs) {
-
-    const block_q1_0_g128 * bq = (const block_q1_0_g128 *) vbq + kbx;
-    const block_q8_1      * y  = bq8_1 + iqs;
-
+static __device__ __forceinline__ float vec_dot_q1_0_g128_q8_1_sub(
+    const block_q1_0_g128 * __restrict__ bq, const block_q8_1 * __restrict__ y, const int sb) {
     int sumi = 0;
 #pragma unroll
     for (int i = 0; i < 8; ++i) {                       // 8 ints = 32 elements
-        const int b = bq->qs[8*iqs + i];                // one byte = 4 two-bit codes, little-first
+        const int b = bq->qs[8*sb + i];                 // one byte = 4 two-bit codes, little-first
         const int packed = (b & 3) | (((b >> 2) & 3) << 8) | (((b >> 4) & 3) << 16) | (((b >> 6) & 3) << 24);
         const int v = __vsub4(packed, 0x01010101);      // {0,1,2} -> {-1,0,+1} per lane
         const int u = get_int_b4(y->qs, i);
         sumi = ggml_cuda_dp4a(v, u, sumi);
     }
     return __half2float(bq->d) * __low2float(y->ds) * (float) sumi;
+}
+
+static __device__ __forceinline__ float vec_dot_q1_0_g128_q8_1(
+    const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & kbx, const int & iqs) {
+    const block_q1_0_g128 * bq = (const block_q1_0_g128 *) vbq + kbx;
+#if TAARDIS_Q1_0_VDR == 4
+    GGML_UNUSED(iqs);                                   // one thread per block, warp-uniform
+    return vec_dot_q1_0_g128_q8_1_sub(bq, bq8_1 + 0, 0) + vec_dot_q1_0_g128_q8_1_sub(bq, bq8_1 + 1, 1)
+         + vec_dot_q1_0_g128_q8_1_sub(bq, bq8_1 + 2, 2) + vec_dot_q1_0_g128_q8_1_sub(bq, bq8_1 + 3, 3);
+#else
+    return vec_dot_q1_0_g128_q8_1_sub(bq, bq8_1 + iqs, iqs);
+#endif
 }
 
 // Base-3 decode via a device LUT (the IQ2/IQ3 grid trick): entry b holds the
@@ -316,35 +327,59 @@ static const __device__ uint64_t q1t_lut5[243] = {
     0x01010101ffull, 0x0101010100ull, 0x0101010101ull,
 };
 
+#ifndef TAARDIS_Q1T_LUT
+#define TAARDIS_Q1T_LUT 1
+#endif
 template <int IQS>
 static __device__ __forceinline__ float vec_dot_q1_t_g128_q8_1_sub(
     const block_q1_t_g128 * __restrict__ bq, const block_q8_1 * __restrict__ y) {
 
-    constexpr int B0 = (32*IQS) / 5;            // first byte holding this sub-block
-    constexpr int S0 = 32*IQS - 5*B0;           // trit offset of element 0 inside it
-    constexpr int NB = (S0 + 32 + 4) / 5;       // bytes touched (7 or 8, max byte 25)
+    constexpr int B0 = (32*IQS) / 5;
+    constexpr int S0 = 32*IQS - 5*B0;
+    constexpr int NB = (S0 + 32 + 4) / 5;
 
+#if TAARDIS_Q1T_LUT
     uint64_t L[NB];
 #pragma unroll
     for (int k = 0; k < NB; ++k) {
-        L[k] = q1t_lut5[bq->qs[B0 + k]];
+        L[k] = __ldg(&q1t_lut5[bq->qs[B0 + k]]);      // read-only cache path
     }
-
     int sumi = 0;
 #pragma unroll
     for (int i = 0; i < 8; ++i) {
-        const int idx = S0 + 4*i;               // stream index of lane 0 of this int
+        const int idx = S0 + 4*i;
         const int k0  = idx / 5;
         const int a   = idx % 5;
         uint32_t v;
-        if (a <= 1) {                           // all 4 lanes inside entry k0
+        if (a <= 1) {
             v = (uint32_t) (L[k0] >> (8*a));
-        } else {                                // straddles k0 / k0+1
+        } else {
             v = (uint32_t) (L[k0] >> (8*a)) | (uint32_t) (L[k0 + 1] << (8*(5 - a)));
         }
         const int u = get_int_b4(y->qs, i);
         sumi = ggml_cuda_dp4a((int) v, u, sumi);
     }
+#else
+    int t[5*NB];
+#pragma unroll
+    for (int k = 0; k < NB; ++k) {
+        const int b  = bq->qs[B0 + k];
+        const int q1 = (b  * 171) >> 9;
+        const int q2 = (q1 * 171) >> 9;
+        const int q3 = (q2 * 171) >> 9;
+        const int q4 = (q3 * 171) >> 9;
+        t[5*k + 0] = b  - 3*q1;  t[5*k + 1] = q1 - 3*q2;  t[5*k + 2] = q2 - 3*q3;
+        t[5*k + 3] = q3 - 3*q4;  t[5*k + 4] = q4;
+    }
+    int sumi = 0;
+#pragma unroll
+    for (int i = 0; i < 8; ++i) {
+        const int packed = t[S0 + 4*i] | (t[S0 + 4*i + 1] << 8) | (t[S0 + 4*i + 2] << 16) | (t[S0 + 4*i + 3] << 24);
+        const int v = __vsub4(packed, 0x01010101);
+        const int u = get_int_b4(y->qs, i);
+        sumi = ggml_cuda_dp4a(v, u, sumi);
+    }
+#endif
     return __half2float(bq->d) * __low2float(y->ds) * (float) sumi;
 }
 
