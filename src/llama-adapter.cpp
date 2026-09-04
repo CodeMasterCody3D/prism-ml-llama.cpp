@@ -211,8 +211,8 @@ static void llama_adapter_lora_init_impl(llama_model & model, const char * path_
         }
 
         auto adapter_type = get_kv_str(llm_kv(LLM_KV_ADAPTER_TYPE));
-                if (adapter_type != "lora" && adapter_type != "taardis-lora") {
-            throw std::runtime_error("expect adapter.type to be "lora", but got: " + adapter_type);
+        if (adapter_type != "lora" && adapter_type != "taardis-lora") {
+            throw std::runtime_error("expect adapter.type to be 'lora' or 'taardis-lora', but got: " + adapter_type);
         }
         const bool taardis_type = adapter_type == "taardis-lora";
 
