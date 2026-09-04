@@ -5,6 +5,9 @@ runtime for [TAARDIS-27B](https://huggingface.co/CodeMasterCody3D/taardis-27b-fu
 a 27B model whose weights, head, embeddings, norms, group scales **and KV cache**
 are ternary integers. By Cody Dixon, 2026.
 
+**Try it in one click** (free Colab GPU, 1M-token ternary context, chat UI): [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/CodeMasterCody3D/taardis-llama.cpp/blob/q1_0_g128-port/notebooks/TAARDIS_chat.ipynb)
+
+
 ## Lineage (read this if the GitHub "forked from" badge confuses you)
 
 1. This repo **began as a fork of PrismML's llama.cpp** (via Mintplex-Labs'
