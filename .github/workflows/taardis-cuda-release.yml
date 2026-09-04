@@ -1,0 +1,252 @@
+name: TAARDIS CUDA release
+
+# Builds a fat, statically-linked (cudart/cublas/cublasLt) CUDA 12.8 binary set on a hosted
+# runner and publishes it to the rolling `cuda-latest` prerelease so notebooks download
+# instead of compiling. Stable download URL:
+#   https://github.com/CodeMasterCody3D/taardis-llama.cpp/releases/download/cuda-latest/taardis-llamacpp-cuda12-linux-x64.tar.gz
+#
+# The compile runs INSIDE nvidia/cuda:12.8.1-devel-ubuntu22.04 (CUDA 12.8 is required for
+# sm_120 Blackwell; Ubuntu 22.04 keeps glibc 2.35 so the binaries run on Colab/Kaggle), driven
+# via `docker run` from a plain ubuntu-22.04 runner rather than as a `container:` job because
+#   - the devel image is ~4.4 GB compressed / ~9 GB unpacked on the runner's root disk and the
+#     fat static build needs several GB more; the host-side disk prune below (~25 GB) cannot be
+#     done from inside a container job;
+#   - `gh` (publish) and `ldd` (portability check on a host WITHOUT any CUDA toolkit) are native
+#     on the runner, so no in-container gh install and no artifact round-trip is needed.
+#
+# Only this workflow's own asset is ever clobbered; other assets on the release (e.g. the
+# single-arch taardis-llamacpp-cuda12-sm75-linux-x64.tar.gz from a Colab T4 job) are untouched.
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - q1_0_g128-port
+    paths:
+      - '.github/workflows/taardis-cuda-release.yml'
+      - '**/CMakeLists.txt'
+      - '**/*.cmake'
+      - '**/*.h'
+      - '**/*.hpp'
+      - '**/*.c'
+      - '**/*.cpp'
+      - '**/*.cu'
+      - '**/*.cuh'
+
+permissions:
+  contents: write   # create/update the cuda-latest release and upload the asset
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CUDA_IMAGE: nvidia/cuda:12.8.1-devel-ubuntu22.04
+  CUDA_ARCHS: "75-real;80-real;86-real;89-real;90-real;120-real"
+  TARGETS: "llama-server llama-cli llama-perplexity llama-bench llama-quantize"
+  ASSET: taardis-llamacpp-cuda12-linux-x64.tar.gz
+  RELEASE_TAG: cuda-latest
+  RELEASE_TITLE: "TAARDIS CUDA binaries (latest)"
+
+jobs:
+  cuda-fat:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+
+    steps:
+      - name: Free runner disk
+        run: |
+          set -x
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup \
+                      /opt/hostedtoolcache/CodeQL /usr/share/swift /usr/local/share/powershell \
+                      /usr/local/share/chromium /usr/local/lib/node_modules /usr/local/julia* || true
+          sudo docker image prune -af >/dev/null 2>&1 || true
+          sudo apt-get clean || true
+          df -h /
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Pull CUDA devel image
+        run: |
+          docker pull "$CUDA_IMAGE"
+          docker image inspect "$CUDA_IMAGE" --format 'unpacked size: {{.Size}} bytes'
+          df -h /
+
+      - name: Build inside the CUDA container
+        run: |
+          cat > "$RUNNER_TEMP/taardis-cuda-build.sh" <<'EOF'
+          #!/usr/bin/env bash
+          # Runs as root inside $CUDA_IMAGE with the checkout bind-mounted at /w.
+          set -euxo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update
+          apt-get install -y --no-install-recommends build-essential ninja-build libgomp1 git ca-certificates curl
+
+          # CMake: Ubuntu 22.04's apt cmake (3.22) has no cublasLt_static -> culibos dependency edge in
+          # FindCUDAToolkit, so the static link order can leave culibos symbols unresolved. 3.31 declares
+          # cublas_static -> cublasLt_static -> culibos and cudart_static -> {pthread,dl,rt} (verified in
+          # Modules/FindCUDAToolkit.cmake). Stay < 4.0 (see the 120f/CMake-regex note in
+          # ggml/src/ggml-cuda/CMakeLists.txt).
+          CMAKE_VER=3.31.8
+          curl -fsSL "https://github.com/Kitware/CMake/releases/download/v${CMAKE_VER}/cmake-${CMAKE_VER}-linux-x86_64.tar.gz" | tar -xz -C /opt
+          export PATH="/opt/cmake-${CMAKE_VER}-linux-x86_64/bin:${PATH}"
+
+          git config --global --add safe.directory '*'   # the checkout is owned by the host runner uid
+          cmake --version | head -1; ninja --version; gcc --version | head -1; nvcc --version | tail -1
+          nproc; free -g; df -h /w
+
+          # GGML_CUDA_CUB_3DOT2 is deliberately left OFF: it FetchContent-clones NVIDIA CCCL 3.2 from
+          # GitHub at configure time (not shipped in the container); argsort.cu / top-k.cu carry explicit
+          # fallbacks for the CCCL 2.7 bundled with CUDA 12.8, so correctness is unaffected.
+          cmake -S . -B build-rel -G Ninja \
+            -DGGML_CUDA=ON \
+            -DGGML_CUDA_NO_VMM=ON \
+            -DCMAKE_CUDA_ARCHITECTURES="${CUDA_ARCHS}" \
+            -DGGML_NATIVE=OFF \
+            -DGGML_AVX2=ON \
+            -DGGML_FMA=ON \
+            -DGGML_F16C=ON \
+            -DGGML_STATIC=ON \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DLLAMA_CURL=OFF \
+            -DCMAKE_BUILD_TYPE=Release
+          # shellcheck disable=SC2086
+          cmake --build build-rel -j "$(nproc)" --target ${TARGETS}
+
+          # provenance
+          {
+            echo "commit=${GITHUB_SHA::7}"
+            echo "commit_full=${GITHUB_SHA}"
+            echo "archs=${CUDA_ARCHS}"
+            echo "nvcc=$(nvcc --version | tail -1)"
+            echo "built_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "targets=${TARGETS}"
+            echo "image=${CUDA_IMAGE}"
+          } > build-rel/bin/VERSION
+          cat build-rel/bin/VERSION
+
+          # strip symbol tables (leaves .nv_fatbin alone) and show what we got
+          for t in ${TARGETS}; do strip --strip-unneeded "build-rel/bin/${t}"; done
+          ls -l build-rel/bin/
+
+          # drop objects/archives so the host has room to tar the multi-GB binary set
+          find build-rel -type f \( -name '*.o' -o -name '*.a' \) -delete
+          chown -R "${HOST_UID}:${HOST_GID}" build-rel
+          df -h /w
+          EOF
+          chmod +x "$RUNNER_TEMP/taardis-cuda-build.sh"
+
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/w" -w /w \
+            -v "$RUNNER_TEMP/taardis-cuda-build.sh:/taardis-cuda-build.sh:ro" \
+            -e GITHUB_SHA -e CUDA_ARCHS -e TARGETS -e CUDA_IMAGE \
+            -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
+            "$CUDA_IMAGE" bash /taardis-cuda-build.sh
+
+      - name: Portability check (ldd on a host with no CUDA toolkit)
+        run: |
+          set -uo pipefail
+          fail=0
+          for t in $TARGETS; do
+            echo "== ldd build-rel/bin/$t =="
+            ldd "build-rel/bin/$t"
+            if ldd "build-rel/bin/$t" | grep -Ei 'libcudart|libcublas|libggml|libllama|not found'; then
+              echo "::error::build-rel/bin/$t dynamically links a CUDA/ggml/llama library (or has an unresolved lib)"
+              fail=1
+            fi
+          done
+          echo "== smoke: llama-server --version (this runner has no GPU; a CUDA init failure is expected and non-fatal) =="
+          ./build-rel/bin/llama-server --version; rc=$?
+          if [ "$rc" -eq 126 ] || [ "$rc" -eq 127 ]; then
+            echo "::error::llama-server could not be executed (exit $rc)"; fail=1
+          elif [ "$rc" -ne 0 ]; then
+            echo "::warning::llama-server --version exited $rc (no GPU on this runner)"
+          fi
+          exit $fail
+
+      - name: Package
+        id: package
+        run: |
+          set -euo pipefail
+          MAX=$((2000*1024*1024))   # GitHub caps release assets at 2 GiB
+          FULL="bin/llama-server bin/llama-cli bin/llama-perplexity bin/llama-bench bin/llama-quantize bin/VERSION"
+          tar -C build-rel -czf "$ASSET" $FULL
+          size=$(stat -c%s "$ASSET")
+          echo "tarball: $size bytes ($((size/1048576)) MiB)"
+          OMITTED=""
+          if [ "$size" -gt "$MAX" ]; then
+            echo "::warning::the five-binary asset is $size bytes > 2 GiB release-asset cap; repackaging without llama-bench/llama-quantize"
+            OMITTED="llama-bench llama-quantize"
+            echo "omitted=${OMITTED} (five-binary tarball was ${size} bytes, over GitHub's 2 GiB release-asset cap)" >> build-rel/bin/VERSION
+            tar -C build-rel -czf "$ASSET" bin/llama-server bin/llama-cli bin/llama-perplexity bin/VERSION
+            size=$(stat -c%s "$ASSET")
+            echo "tarball: $size bytes ($((size/1048576)) MiB)"
+            if [ "$size" -gt "$MAX" ]; then echo "::error::even the reduced asset exceeds 2 GiB"; exit 1; fi
+          fi
+          tar -tzvf "$ASSET"
+          sha256sum "$ASSET" | tee "$ASSET.sha256"
+          {
+            echo "omitted=$OMITTED"
+            echo "size=$size"
+            echo "mib=$((size/1048576))"
+            echo "sha256=$(cut -d' ' -f1 "$ASSET.sha256")"
+          } >> "$GITHUB_OUTPUT"
+          df -h /
+
+      - name: Publish to the cuda-latest prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OMITTED: ${{ steps.package.outputs.omitted }}
+          ASSET_MIB: ${{ steps.package.outputs.mib }}
+          ASSET_SHA256: ${{ steps.package.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          NVCC_LINE=$(grep '^nvcc=' build-rel/bin/VERSION | cut -d= -f2-)
+          DL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}/${ASSET}"
+          RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          CONTENTS="bin/llama-server bin/llama-cli bin/llama-perplexity bin/llama-bench bin/llama-quantize bin/VERSION"
+          if [ -n "$OMITTED" ]; then
+            CONTENTS="bin/llama-server bin/llama-cli bin/llama-perplexity bin/VERSION"
+          fi
+          {
+            echo "Rolling prerelease: fat, statically-linked CUDA 12 build of TAARDIS llama.cpp for Linux x86-64."
+            echo
+            echo "- **Built from** \`${GITHUB_SHA}\` (branch \`${GITHUB_REF_NAME}\`) on **${NOW}** by [run ${GITHUB_RUN_ID}](${RUN_URL})."
+            echo "- **Asset** \`${ASSET}\` (${ASSET_MIB} MiB, sha256 \`${ASSET_SHA256}\`) is **replaced on every build** of this workflow; the download URL is stable:"
+            echo "  ${DL}"
+            echo "- CUDA archs: \`${CUDA_ARCHS}\` (ggml maps 120 to 120a); toolkit: ${NVCC_LINE}; built inside \`${CUDA_IMAGE}\` (glibc 2.35, so it runs on Ubuntu 22.04 hosts such as Colab and Kaggle); CPU code path AVX2/FMA/F16C, not -march=native."
+            echo "- cudart, cublas and cublasLt are linked statically and libcuda is not linked (GGML_CUDA_NO_VMM): only the NVIDIA driver is needed at runtime (R550+/CUDA 12.4 for the compressed fatbin; R570+ for sm_120 Blackwell)."
+            echo "- Contents: \`${CONTENTS}\`; \`bin/VERSION\` carries commit, archs, nvcc version and UTC build time."
+            if [ -n "$OMITTED" ]; then
+              echo "- **Note:** \`${OMITTED}\` were omitted from this build because the five-binary tarball exceeded GitHub's 2 GiB release-asset cap."
+            fi
+            echo "- Tag policy: the \`${RELEASE_TAG}\` tag is **not moved** on rebuilds (it stays on the commit it was first created at); provenance is this note and \`bin/VERSION\`."
+            echo "- Other assets on this release (e.g. \`taardis-llamacpp-cuda12-sm75-linux-x64.tar.gz\` from a Colab T4 job) are uploaded by other jobs and are never touched by this workflow."
+          } > "$RUNNER_TEMP/notes.md"
+          cat "$RUNNER_TEMP/notes.md"
+
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "release $RELEASE_TAG exists: clobbering $ASSET and refreshing the notes"
+            gh release upload "$RELEASE_TAG" "$ASSET" --clobber --repo "$GITHUB_REPOSITORY"
+            gh release edit "$RELEASE_TAG" --prerelease --title "$RELEASE_TITLE" --notes-file "$RUNNER_TEMP/notes.md" --repo "$GITHUB_REPOSITORY"
+          else
+            echo "release $RELEASE_TAG missing: creating it at $GITHUB_SHA"
+            if ! gh release create "$RELEASE_TAG" "$ASSET" --target "$GITHUB_SHA" --prerelease --title "$RELEASE_TITLE" --notes-file "$RUNNER_TEMP/notes.md" --repo "$GITHUB_REPOSITORY"; then
+              echo "create failed (created concurrently by another job?) - falling back to upload --clobber"
+              gh release upload "$RELEASE_TAG" "$ASSET" --clobber --repo "$GITHUB_REPOSITORY"
+              gh release edit "$RELEASE_TAG" --prerelease --title "$RELEASE_TITLE" --notes-file "$RUNNER_TEMP/notes.md" --repo "$GITHUB_REPOSITORY"
+            fi
+          fi
+
+      - name: Verify release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --json tagName,isPrerelease,url,targetCommitish,assets \
+            --jq '{tagName,isPrerelease,url,targetCommitish,assets:[.assets[]|{name,size,url}]}'
