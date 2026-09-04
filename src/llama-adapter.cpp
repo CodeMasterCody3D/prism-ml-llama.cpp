@@ -211,14 +211,15 @@ static void llama_adapter_lora_init_impl(llama_model & model, const char * path_
         }
 
         auto adapter_type = get_kv_str(llm_kv(LLM_KV_ADAPTER_TYPE));
-        if (adapter_type != "lora") {
-            throw std::runtime_error("expect adapter.type to be 'lora', but got: " + adapter_type);
+                if (adapter_type != "lora" && adapter_type != "taardis-lora") {
+            throw std::runtime_error("expect adapter.type to be "lora", but got: " + adapter_type);
         }
+        const bool taardis_type = adapter_type == "taardis-lora";
 
         adapter.alpha = get_kv_f32(llm_kv(LLM_KV_ADAPTER_LORA_ALPHA));
         {   // TAARDIS: optional flag, absent for ordinary LoRAs
             const int rb = gguf_find_key(ctx_gguf.get(), "adapter.taardis.rotated_basis");
-            adapter.rotated_basis = rb >= 0 && gguf_get_val_bool(ctx_gguf.get(), rb);
+            adapter.rotated_basis = taardis_type || (rb >= 0 && gguf_get_val_bool(ctx_gguf.get(), rb));
             if (adapter.rotated_basis) {
                 LLAMA_LOG_INFO("%s: adapter declares rotated_basis -> fed the rotated activation on rotation-mapped tensors\n", __func__);
             }
