@@ -240,6 +240,64 @@ template <int vdr> static __device__ __forceinline__ float vec_dot_q5_1_q8_1_imp
     return sumi*d5d8 + m5s8 / (QI5_1 / vdr);
 }
 
+
+// ===== TAARDIS ternary: fused GEMV against q8_1, no f16 intermediate =========
+// Contract (qi = 4 units per 128-block, vdr = 1): one call handles the 32
+// elements [32*iqs, 32*iqs+32) of block kbx against q8_1 sub-block bq8_1[iqs].
+// w = d * (code - 1) with code in {0,1,2}; lanes hold (code-1) in {-1,0,+1}
+// via __vsub4 (per-byte subtract, no inter-lane borrow), then 8x dp4a.
+#define VDR_Q1_0_G128_Q8_1_MMVQ 1
+#define VDR_Q1_T_G128_Q8_1_MMVQ 1
+
+static __device__ __forceinline__ float vec_dot_q1_0_g128_q8_1(
+    const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & kbx, const int & iqs) {
+
+    const block_q1_0_g128 * bq = (const block_q1_0_g128 *) vbq + kbx;
+    const block_q8_1      * y  = bq8_1 + iqs;
+
+    int sumi = 0;
+#pragma unroll
+    for (int i = 0; i < 8; ++i) {                       // 8 ints = 32 elements
+        const int b = bq->qs[8*iqs + i];                // one byte = 4 two-bit codes, little-first
+        const int packed = (b & 3) | (((b >> 2) & 3) << 8) | (((b >> 4) & 3) << 16) | (((b >> 6) & 3) << 24);
+        const int v = __vsub4(packed, 0x01010101);      // {0,1,2} -> {-1,0,+1} per lane
+        const int u = get_int_b4(y->qs, i);
+        sumi = ggml_cuda_dp4a(v, u, sumi);
+    }
+    return __half2float(bq->d) * __low2float(y->ds) * (float) sumi;
+}
+
+static __device__ __forceinline__ float vec_dot_q1_t_g128_q8_1(
+    const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & kbx, const int & iqs) {
+
+    const block_q1_t_g128 * bq = (const block_q1_t_g128 *) vbq + kbx;
+    const block_q8_1      * y  = bq8_1 + iqs;
+    const int j0 = 32*iqs;
+
+    int sumi = 0;
+#pragma unroll
+    for (int i = 0; i < 8; ++i) {
+        int packed = 0;
+#pragma unroll
+        for (int l = 0; l < 4; ++l) {                   // base-3 unpack: trit s of byte b is (b/3^s)%3
+            const int j = j0 + 4*i + l;
+            int t = bq->qs[j/5];
+            switch (j % 5) {
+                case 4: t /= 3;  // fallthrough
+                case 3: t /= 3;  // fallthrough
+                case 2: t /= 3;  // fallthrough
+                case 1: t /= 3;  // fallthrough
+                default: break;
+            }
+            packed |= (t % 3) << (8*l);
+        }
+        const int v = __vsub4(packed, 0x01010101);
+        const int u = get_int_b4(y->qs, i);
+        sumi = ggml_cuda_dp4a(v, u, sumi);
+    }
+    return __half2float(bq->d) * __low2float(y->ds) * (float) sumi;
+}
+
 #define VDR_Q8_0_Q8_1_MMVQ 2
 #define VDR_Q8_0_Q8_1_MMQ 8
 
