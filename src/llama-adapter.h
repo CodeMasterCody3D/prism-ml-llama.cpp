@@ -70,6 +70,7 @@ struct llama_adapter_lora {
     std::vector<ggml_backend_buffer_ptr> bufs;
 
     float alpha;
+    bool  rotated_basis = false; // TAARDIS: adapter trained on the block-Hadamard-rotated input
 
     // gguf metadata
     std::unordered_map<std::string, std::string> gguf_kv;

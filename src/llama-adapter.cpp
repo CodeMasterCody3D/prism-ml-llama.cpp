@@ -216,6 +216,13 @@ static void llama_adapter_lora_init_impl(llama_model & model, const char * path_
         }
 
         adapter.alpha = get_kv_f32(llm_kv(LLM_KV_ADAPTER_LORA_ALPHA));
+        {   // TAARDIS: optional flag, absent for ordinary LoRAs
+            const int rb = gguf_find_key(ctx_gguf.get(), "adapter.taardis.rotated_basis");
+            adapter.rotated_basis = rb >= 0 && gguf_get_val_bool(ctx_gguf.get(), rb);
+            if (adapter.rotated_basis) {
+                LLAMA_LOG_INFO("%s: adapter declares rotated_basis -> fed the rotated activation on rotation-mapped tensors\n", __func__);
+            }
+        }
 
         // parse alora invocation sequence vector
         const auto & key = llm_kv(LLM_KV_ADAPTER_ALORA_INVOCATION_TOKENS);

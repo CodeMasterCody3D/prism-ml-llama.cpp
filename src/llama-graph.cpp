@@ -1577,7 +1577,7 @@ ggml_tensor * llm_graph_context::build_lora_mm(
 
         ggml_tensor * ab_cur = ggml_mul_mat(
                 ctx0, lw->b,
-                ggml_mul_mat(ctx0, lw->a, cur)
+                ggml_mul_mat(ctx0, lw->a, lora.first->rotated_basis ? mm_in : cur)
                 );
 
         ab_cur = ggml_scale(ctx0, ab_cur, scale);
