@@ -247,7 +247,7 @@ template <int vdr> static __device__ __forceinline__ float vec_dot_q5_1_q8_1_imp
 // w = d * (code - 1) with code in {0,1,2}; lanes hold (code-1) in {-1,0,+1}
 // via __vsub4 (per-byte subtract, no inter-lane borrow), then 8x dp4a.
 #define VDR_Q1_0_G128_Q8_1_MMVQ 1
-#define VDR_Q1_T_G128_Q8_1_MMVQ 1
+#define VDR_Q1_T_G128_Q8_1_MMVQ 4   // == qi: one thread per 128-block, no per-lane switch (warp-uniform)
 
 static __device__ __forceinline__ float vec_dot_q1_0_g128_q8_1(
     const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & kbx, const int & iqs) {
@@ -351,14 +351,16 @@ static __device__ __forceinline__ float vec_dot_q1_t_g128_q8_1_sub(
 static __device__ __forceinline__ float vec_dot_q1_t_g128_q8_1(
     const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & kbx, const int & iqs) {
 
+    // vdr == qi -> kqs == 0 for every thread: the whole 128-element block is
+    // handled here, all four sub-block templates run straight-line (no
+    // divergent switch), and consecutive threads read consecutive 28-byte
+    // blocks (coalesced).
+    GGML_UNUSED(iqs);
     const block_q1_t_g128 * bq = (const block_q1_t_g128 *) vbq + kbx;
-    const block_q8_1      * y  = bq8_1 + iqs;
-    switch (iqs) {
-        case 0:  return vec_dot_q1_t_g128_q8_1_sub<0>(bq, y);
-        case 1:  return vec_dot_q1_t_g128_q8_1_sub<1>(bq, y);
-        case 2:  return vec_dot_q1_t_g128_q8_1_sub<2>(bq, y);
-        default: return vec_dot_q1_t_g128_q8_1_sub<3>(bq, y);
-    }
+    return vec_dot_q1_t_g128_q8_1_sub<0>(bq, bq8_1 + 0)
+         + vec_dot_q1_t_g128_q8_1_sub<1>(bq, bq8_1 + 1)
+         + vec_dot_q1_t_g128_q8_1_sub<2>(bq, bq8_1 + 2)
+         + vec_dot_q1_t_g128_q8_1_sub<3>(bq, bq8_1 + 3);
 }
 
 #define VDR_Q8_0_Q8_1_MMVQ 2
