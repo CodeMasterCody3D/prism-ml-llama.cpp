@@ -267,39 +267,83 @@ static __device__ __forceinline__ float vec_dot_q1_0_g128_q8_1(
     return __half2float(bq->d) * __low2float(y->ds) * (float) sumi;
 }
 
-// Per-byte base-3 decode: (b*171)>>9 == b/3 exactly for b in [0,242], so one
-// mul-shift chain yields all 5 trits of a byte. Templated on the sub-block so
-// every lane index is a compile-time constant (registers, no local spills).
+// Base-3 decode via a device LUT (the IQ2/IQ3 grid trick): entry b holds the
+// 5 trits of byte b as int8 lanes ALREADY mapped to {-1,0,+1} (lane s at byte
+// s, bytes 5..7 zero). One L1-cached 64-bit load replaces the whole
+// divide chain and the __vsub4. Lanes for a 32-element sub-block are then
+// assembled with constant-amount shifts (all indices fold at compile time).
+static const __device__ uint64_t q1t_lut5[243] = {
+    0xffffffffffull, 0xffffffff00ull, 0xffffffff01ull, 0xffffff00ffull, 0xffffff0000ull, 0xffffff0001ull,
+    0xffffff01ffull, 0xffffff0100ull, 0xffffff0101ull, 0xffff00ffffull, 0xffff00ff00ull, 0xffff00ff01ull,
+    0xffff0000ffull, 0xffff000000ull, 0xffff000001ull, 0xffff0001ffull, 0xffff000100ull, 0xffff000101ull,
+    0xffff01ffffull, 0xffff01ff00ull, 0xffff01ff01ull, 0xffff0100ffull, 0xffff010000ull, 0xffff010001ull,
+    0xffff0101ffull, 0xffff010100ull, 0xffff010101ull, 0xff00ffffffull, 0xff00ffff00ull, 0xff00ffff01ull,
+    0xff00ff00ffull, 0xff00ff0000ull, 0xff00ff0001ull, 0xff00ff01ffull, 0xff00ff0100ull, 0xff00ff0101ull,
+    0xff0000ffffull, 0xff0000ff00ull, 0xff0000ff01ull, 0xff000000ffull, 0xff00000000ull, 0xff00000001ull,
+    0xff000001ffull, 0xff00000100ull, 0xff00000101ull, 0xff0001ffffull, 0xff0001ff00ull, 0xff0001ff01ull,
+    0xff000100ffull, 0xff00010000ull, 0xff00010001ull, 0xff000101ffull, 0xff00010100ull, 0xff00010101ull,
+    0xff01ffffffull, 0xff01ffff00ull, 0xff01ffff01ull, 0xff01ff00ffull, 0xff01ff0000ull, 0xff01ff0001ull,
+    0xff01ff01ffull, 0xff01ff0100ull, 0xff01ff0101ull, 0xff0100ffffull, 0xff0100ff00ull, 0xff0100ff01ull,
+    0xff010000ffull, 0xff01000000ull, 0xff01000001ull, 0xff010001ffull, 0xff01000100ull, 0xff01000101ull,
+    0xff0101ffffull, 0xff0101ff00ull, 0xff0101ff01ull, 0xff010100ffull, 0xff01010000ull, 0xff01010001ull,
+    0xff010101ffull, 0xff01010100ull, 0xff01010101ull, 0x00ffffffffull, 0x00ffffff00ull, 0x00ffffff01ull,
+    0x00ffff00ffull, 0x00ffff0000ull, 0x00ffff0001ull, 0x00ffff01ffull, 0x00ffff0100ull, 0x00ffff0101ull,
+    0x00ff00ffffull, 0x00ff00ff00ull, 0x00ff00ff01ull, 0x00ff0000ffull, 0x00ff000000ull, 0x00ff000001ull,
+    0x00ff0001ffull, 0x00ff000100ull, 0x00ff000101ull, 0x00ff01ffffull, 0x00ff01ff00ull, 0x00ff01ff01ull,
+    0x00ff0100ffull, 0x00ff010000ull, 0x00ff010001ull, 0x00ff0101ffull, 0x00ff010100ull, 0x00ff010101ull,
+    0x0000ffffffull, 0x0000ffff00ull, 0x0000ffff01ull, 0x0000ff00ffull, 0x0000ff0000ull, 0x0000ff0001ull,
+    0x0000ff01ffull, 0x0000ff0100ull, 0x0000ff0101ull, 0x000000ffffull, 0x000000ff00ull, 0x000000ff01ull,
+    0x00000000ffull, 0x0000000000ull, 0x0000000001ull, 0x00000001ffull, 0x0000000100ull, 0x0000000101ull,
+    0x000001ffffull, 0x000001ff00ull, 0x000001ff01ull, 0x00000100ffull, 0x0000010000ull, 0x0000010001ull,
+    0x00000101ffull, 0x0000010100ull, 0x0000010101ull, 0x0001ffffffull, 0x0001ffff00ull, 0x0001ffff01ull,
+    0x0001ff00ffull, 0x0001ff0000ull, 0x0001ff0001ull, 0x0001ff01ffull, 0x0001ff0100ull, 0x0001ff0101ull,
+    0x000100ffffull, 0x000100ff00ull, 0x000100ff01ull, 0x00010000ffull, 0x0001000000ull, 0x0001000001ull,
+    0x00010001ffull, 0x0001000100ull, 0x0001000101ull, 0x000101ffffull, 0x000101ff00ull, 0x000101ff01ull,
+    0x00010100ffull, 0x0001010000ull, 0x0001010001ull, 0x00010101ffull, 0x0001010100ull, 0x0001010101ull,
+    0x01ffffffffull, 0x01ffffff00ull, 0x01ffffff01ull, 0x01ffff00ffull, 0x01ffff0000ull, 0x01ffff0001ull,
+    0x01ffff01ffull, 0x01ffff0100ull, 0x01ffff0101ull, 0x01ff00ffffull, 0x01ff00ff00ull, 0x01ff00ff01ull,
+    0x01ff0000ffull, 0x01ff000000ull, 0x01ff000001ull, 0x01ff0001ffull, 0x01ff000100ull, 0x01ff000101ull,
+    0x01ff01ffffull, 0x01ff01ff00ull, 0x01ff01ff01ull, 0x01ff0100ffull, 0x01ff010000ull, 0x01ff010001ull,
+    0x01ff0101ffull, 0x01ff010100ull, 0x01ff010101ull, 0x0100ffffffull, 0x0100ffff00ull, 0x0100ffff01ull,
+    0x0100ff00ffull, 0x0100ff0000ull, 0x0100ff0001ull, 0x0100ff01ffull, 0x0100ff0100ull, 0x0100ff0101ull,
+    0x010000ffffull, 0x010000ff00ull, 0x010000ff01ull, 0x01000000ffull, 0x0100000000ull, 0x0100000001ull,
+    0x01000001ffull, 0x0100000100ull, 0x0100000101ull, 0x010001ffffull, 0x010001ff00ull, 0x010001ff01ull,
+    0x01000100ffull, 0x0100010000ull, 0x0100010001ull, 0x01000101ffull, 0x0100010100ull, 0x0100010101ull,
+    0x0101ffffffull, 0x0101ffff00ull, 0x0101ffff01ull, 0x0101ff00ffull, 0x0101ff0000ull, 0x0101ff0001ull,
+    0x0101ff01ffull, 0x0101ff0100ull, 0x0101ff0101ull, 0x010100ffffull, 0x010100ff00ull, 0x010100ff01ull,
+    0x01010000ffull, 0x0101000000ull, 0x0101000001ull, 0x01010001ffull, 0x0101000100ull, 0x0101000101ull,
+    0x010101ffffull, 0x010101ff00ull, 0x010101ff01ull, 0x01010100ffull, 0x0101010000ull, 0x0101010001ull,
+    0x01010101ffull, 0x0101010100ull, 0x0101010101ull,
+};
+
 template <int IQS>
 static __device__ __forceinline__ float vec_dot_q1_t_g128_q8_1_sub(
     const block_q1_t_g128 * __restrict__ bq, const block_q8_1 * __restrict__ y) {
 
     constexpr int B0 = (32*IQS) / 5;            // first byte holding this sub-block
     constexpr int S0 = 32*IQS - 5*B0;           // trit offset of element 0 inside it
-    constexpr int NB = (S0 + 32 + 4) / 5;       // bytes to decode (7 or 8, max byte 25)
+    constexpr int NB = (S0 + 32 + 4) / 5;       // bytes touched (7 or 8, max byte 25)
 
-    int t[5*NB];
+    uint64_t L[NB];
 #pragma unroll
     for (int k = 0; k < NB; ++k) {
-        const int b  = bq->qs[B0 + k];
-        const int q1 = (b  * 171) >> 9;
-        const int q2 = (q1 * 171) >> 9;
-        const int q3 = (q2 * 171) >> 9;
-        const int q4 = (q3 * 171) >> 9;
-        t[5*k + 0] = b  - 3*q1;
-        t[5*k + 1] = q1 - 3*q2;
-        t[5*k + 2] = q2 - 3*q3;
-        t[5*k + 3] = q3 - 3*q4;
-        t[5*k + 4] = q4;
+        L[k] = q1t_lut5[bq->qs[B0 + k]];
     }
 
     int sumi = 0;
 #pragma unroll
     for (int i = 0; i < 8; ++i) {
-        const int packed = t[S0 + 4*i + 0] | (t[S0 + 4*i + 1] << 8) | (t[S0 + 4*i + 2] << 16) | (t[S0 + 4*i + 3] << 24);
-        const int v = __vsub4(packed, 0x01010101);      // {0,1,2} -> {-1,0,+1} per lane
+        const int idx = S0 + 4*i;               // stream index of lane 0 of this int
+        const int k0  = idx / 5;
+        const int a   = idx % 5;
+        uint32_t v;
+        if (a <= 1) {                           // all 4 lanes inside entry k0
+            v = (uint32_t) (L[k0] >> (8*a));
+        } else {                                // straddles k0 / k0+1
+            v = (uint32_t) (L[k0] >> (8*a)) | (uint32_t) (L[k0 + 1] << (8*(5 - a)));
+        }
         const int u = get_int_b4(y->qs, i);
-        sumi = ggml_cuda_dp4a(v, u, sumi);
+        sumi = ggml_cuda_dp4a((int) v, u, sumi);
     }
     return __half2float(bq->d) * __low2float(y->ds) * (float) sumi;
 }
