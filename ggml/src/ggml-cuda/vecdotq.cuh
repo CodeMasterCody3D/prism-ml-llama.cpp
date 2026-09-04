@@ -267,35 +267,54 @@ static __device__ __forceinline__ float vec_dot_q1_0_g128_q8_1(
     return __half2float(bq->d) * __low2float(y->ds) * (float) sumi;
 }
 
+// Per-byte base-3 decode: (b*171)>>9 == b/3 exactly for b in [0,242], so one
+// mul-shift chain yields all 5 trits of a byte. Templated on the sub-block so
+// every lane index is a compile-time constant (registers, no local spills).
+template <int IQS>
+static __device__ __forceinline__ float vec_dot_q1_t_g128_q8_1_sub(
+    const block_q1_t_g128 * __restrict__ bq, const block_q8_1 * __restrict__ y) {
+
+    constexpr int B0 = (32*IQS) / 5;            // first byte holding this sub-block
+    constexpr int S0 = 32*IQS - 5*B0;           // trit offset of element 0 inside it
+    constexpr int NB = (S0 + 32 + 4) / 5;       // bytes to decode (7 or 8, max byte 25)
+
+    int t[5*NB];
+#pragma unroll
+    for (int k = 0; k < NB; ++k) {
+        const int b  = bq->qs[B0 + k];
+        const int q1 = (b  * 171) >> 9;
+        const int q2 = (q1 * 171) >> 9;
+        const int q3 = (q2 * 171) >> 9;
+        const int q4 = (q3 * 171) >> 9;
+        t[5*k + 0] = b  - 3*q1;
+        t[5*k + 1] = q1 - 3*q2;
+        t[5*k + 2] = q2 - 3*q3;
+        t[5*k + 3] = q3 - 3*q4;
+        t[5*k + 4] = q4;
+    }
+
+    int sumi = 0;
+#pragma unroll
+    for (int i = 0; i < 8; ++i) {
+        const int packed = t[S0 + 4*i + 0] | (t[S0 + 4*i + 1] << 8) | (t[S0 + 4*i + 2] << 16) | (t[S0 + 4*i + 3] << 24);
+        const int v = __vsub4(packed, 0x01010101);      // {0,1,2} -> {-1,0,+1} per lane
+        const int u = get_int_b4(y->qs, i);
+        sumi = ggml_cuda_dp4a(v, u, sumi);
+    }
+    return __half2float(bq->d) * __low2float(y->ds) * (float) sumi;
+}
+
 static __device__ __forceinline__ float vec_dot_q1_t_g128_q8_1(
     const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & kbx, const int & iqs) {
 
     const block_q1_t_g128 * bq = (const block_q1_t_g128 *) vbq + kbx;
     const block_q8_1      * y  = bq8_1 + iqs;
-    const int j0 = 32*iqs;
-
-    int sumi = 0;
-#pragma unroll
-    for (int i = 0; i < 8; ++i) {
-        int packed = 0;
-#pragma unroll
-        for (int l = 0; l < 4; ++l) {                   // base-3 unpack: trit s of byte b is (b/3^s)%3
-            const int j = j0 + 4*i + l;
-            int t = bq->qs[j/5];
-            switch (j % 5) {
-                case 4: t /= 3;  // fallthrough
-                case 3: t /= 3;  // fallthrough
-                case 2: t /= 3;  // fallthrough
-                case 1: t /= 3;  // fallthrough
-                default: break;
-            }
-            packed |= (t % 3) << (8*l);
-        }
-        const int v = __vsub4(packed, 0x01010101);
-        const int u = get_int_b4(y->qs, i);
-        sumi = ggml_cuda_dp4a(v, u, sumi);
+    switch (iqs) {
+        case 0:  return vec_dot_q1_t_g128_q8_1_sub<0>(bq, y);
+        case 1:  return vec_dot_q1_t_g128_q8_1_sub<1>(bq, y);
+        case 2:  return vec_dot_q1_t_g128_q8_1_sub<2>(bq, y);
+        default: return vec_dot_q1_t_g128_q8_1_sub<3>(bq, y);
     }
-    return __half2float(bq->d) * __low2float(y->ds) * (float) sumi;
 }
 
 #define VDR_Q8_0_Q8_1_MMVQ 2
