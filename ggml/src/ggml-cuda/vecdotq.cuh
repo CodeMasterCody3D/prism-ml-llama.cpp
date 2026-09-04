@@ -250,7 +250,14 @@ template <int vdr> static __device__ __forceinline__ float vec_dot_q5_1_q8_1_imp
 #define TAARDIS_Q1_0_VDR 1
 #endif
 #define VDR_Q1_0_G128_Q8_1_MMVQ TAARDIS_Q1_0_VDR
-#define VDR_Q1_T_G128_Q8_1_MMVQ 4   // == qi: one thread per 128-block, no per-lane switch (warp-uniform)
+#ifndef TAARDIS_Q1T_MODE
+#define TAARDIS_Q1T_MODE 1       // 1 = warp-uniform vdr=1 (funnel-shift window); 0 = templated vdr=4
+#endif
+#if TAARDIS_Q1T_MODE == 1
+#define VDR_Q1_T_G128_Q8_1_MMVQ 1
+#else
+#define VDR_Q1_T_G128_Q8_1_MMVQ 4
+#endif
 
 static __device__ __forceinline__ float vec_dot_q1_0_g128_q8_1_sub(
     const block_q1_0_g128 * __restrict__ bq, const block_q8_1 * __restrict__ y, const int sb) {
@@ -386,16 +393,53 @@ static __device__ __forceinline__ float vec_dot_q1_t_g128_q8_1_sub(
 static __device__ __forceinline__ float vec_dot_q1_t_g128_q8_1(
     const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & kbx, const int & iqs) {
 
-    // vdr == qi -> kqs == 0 for every thread: the whole 128-element block is
-    // handled here, all four sub-block templates run straight-line (no
-    // divergent switch), and consecutive threads read consecutive 28-byte
-    // blocks (coalesced).
-    GGML_UNUSED(iqs);
     const block_q1_t_g128 * bq = (const block_q1_t_g128 *) vbq + kbx;
-    return vec_dot_q1_t_g128_q8_1_sub<0>(bq, bq8_1 + 0)
-         + vec_dot_q1_t_g128_q8_1_sub<1>(bq, bq8_1 + 1)
-         + vec_dot_q1_t_g128_q8_1_sub<2>(bq, bq8_1 + 2)
-         + vec_dot_q1_t_g128_q8_1_sub<3>(bq, bq8_1 + 3);
+#if TAARDIS_Q1T_MODE == 1
+    // Warp-uniform sub-block kernel: every thread runs the SAME instructions;
+    // only the data (which 32-element window of the 128-block) differs.
+    //   B0 = first byte of the window, S0 = trit offset inside it (0..4).
+    // The 8 LUT entries (5 lanes each, zero-padded to 8 bytes) are packed
+    // into a 40-byte lane stream with CONSTANT shifts, the S0>=4 case is a
+    // predicated word select, and the residual 0..3-byte offset is a
+    // runtime-amount funnel shift.  No switch, no dynamic register indexing.
+    const block_q8_1 * y  = bq8_1 + iqs;
+    const int B0 = (32*iqs) / 5;
+    const int S0 = 32*iqs - 5*B0;
+
+    uint64_t L[8];
+#pragma unroll
+    for (int k = 0; k < 8; ++k) {
+        const int bi = B0 + k;
+        L[k] = q1t_lut5[bq->qs[bi < 26 ? bi : 25]];       // clamp: lanes past the window are unused
+    }
+    // stream word w = lane bytes 4w..4w+3; lane j lives in entry j/5, byte j%5
+    uint32_t S[10];
+#pragma unroll
+    for (int g = 0; g < 2; ++g) {                          // 4 entries -> 5 words, twice
+        const uint64_t a = L[4*g + 0], b = L[4*g + 1], c = L[4*g + 2], d = L[4*g + 3];
+        S[5*g + 0] = (uint32_t)  a;
+        S[5*g + 1] = (uint32_t) (a >> 32) | (uint32_t) (b << 8);
+        S[5*g + 2] = (uint32_t) (b >> 24) | (uint32_t) (c << 16);
+        S[5*g + 3] = (uint32_t) (c >> 16) | (uint32_t) (d << 24);
+        S[5*g + 4] = (uint32_t) (d >> 8);
+    }
+    const bool hi = S0 >= 4;                                // window starts in word 1
+    const int  sh = 8 * (S0 & 3);                           // residual byte offset
+    int sumi = 0;
+#pragma unroll
+    for (int i = 0; i < 8; ++i) {
+        const uint32_t w0 = hi ? S[i + 1] : S[i];
+        const uint32_t w1 = hi ? S[i + 2] : S[i + 1];
+        const int v = (int) __funnelshift_r(w0, w1, sh);   // 4 lanes at byte offset S0
+        const int u = get_int_b4(y->qs, i);
+        sumi = ggml_cuda_dp4a(v, u, sumi);
+    }
+    return __half2float(bq->d) * __low2float(y->ds) * (float) sumi;
+#else
+    GGML_UNUSED(iqs);
+    return vec_dot_q1_t_g128_q8_1_sub<0>(bq, bq8_1 + 0) + vec_dot_q1_t_g128_q8_1_sub<1>(bq, bq8_1 + 1)
+         + vec_dot_q1_t_g128_q8_1_sub<2>(bq, bq8_1 + 2) + vec_dot_q1_t_g128_q8_1_sub<3>(bq, bq8_1 + 3);
+#endif
 }
 
 #define VDR_Q8_0_Q8_1_MMVQ 2
